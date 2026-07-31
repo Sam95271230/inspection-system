@@ -59,22 +59,50 @@ def _mask_password(pwd: str) -> str:
 
 
 def _send_email(config: EmailConfig, to_email: str, subject: str, body: str):
-    """同步发送邮件"""
+    """同步发送邮件，支持 TLS/SSL 两种模式"""
     msg = MIMEMultipart()
     msg["From"] = f"{config.from_name} <{config.smtp_user}>"
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "html", "utf-8"))
 
-    if config.smtp_use_tls:
-        server = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=10)
-        server.starttls()
-    else:
-        server = smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=10)
+    last_error = None
 
-    server.login(config.smtp_user, config.smtp_password)
-    server.sendmail(config.smtp_user, [to_email], msg.as_string())
-    server.quit()
+    # 尝试用户配置的加密方式
+    modes = [(config.smtp_use_tls, config.smtp_port)]
+
+    # 如果用户选 TLS(587)，也尝试 SSL(465) 作为备选
+    if config.smtp_use_tls and config.smtp_port == 587:
+        modes.append((False, 465))
+    elif not config.smtp_use_tls and config.smtp_port == 465:
+        modes.append((True, 587))
+
+    for use_tls, port in modes:
+        try:
+            if use_tls:
+                server = smtplib.SMTP(config.smtp_host, port, timeout=15)
+                server.ehlo()
+                if server.has_extn("STARTTLS"):
+                    server.starttls()
+                    server.ehlo()
+                server.login(config.smtp_user, config.smtp_password)
+            else:
+                ctx = __import__('ssl').create_default_context()
+                server = smtplib.SMTP_SSL(config.smtp_host, port, timeout=15, context=ctx)
+                server.login(config.smtp_user, config.smtp_password)
+
+            server.sendmail(config.smtp_user, [to_email], msg.as_string())
+            server.quit()
+            return  # 发送成功
+        except Exception as e:
+            last_error = str(e)
+            try:
+                server.quit()
+            except Exception:
+                pass
+            continue
+
+    raise Exception(last_error or "未知发送错误")
 
 
 @router.get("")
@@ -144,4 +172,4 @@ async def test_email_config(
         _send_email(config, data.to_email, subject, body)
         return success({"message": f"测试邮件已发送至 {data.to_email}，请查收"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"邮件发送失败：{str(e)}")
+        raise HTTPException(status_code=500, detail=f"邮件发送失败：{str(e)}。请检查SMTP服务器、端口、账号和授权码是否正确。QQ邮箱需使用SMTP授权码而非密码。")
