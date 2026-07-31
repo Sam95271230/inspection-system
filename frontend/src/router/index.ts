@@ -36,6 +36,12 @@ const routes = [
     name: 'Exceptions',
     component: () => import('@/views/ExceptionSignOffView.vue'),
     meta: { requiresAuth: true },
+  },
+  {
+    path: '/dict',
+    name: 'DictManagement',
+    component: () => import('@/views/DictManagementView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
   }
 ]
 

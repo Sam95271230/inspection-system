@@ -13,6 +13,12 @@ export const uploadImage = (file: File) => {
   return request.post('/inspections/upload', formData)
 }
 
+export const importDict = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post('/dict/import', formData)
+}
+
 export const exportInspections = async (params: any) => {
   const response = await axios.get('/api/v1/inspections/export', {
     params,

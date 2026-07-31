@@ -20,6 +20,7 @@ const checkBackend = async () => {
 const goToInspection = () => router.push('/inspection')
 const goToRecords = () => router.push('/records')
 const goToUsers = () => router.push('/users')
+const goToDict = () => router.push('/dict')
 const goToExceptions = () => router.push('/exceptions')
 
 const logout = () => {
@@ -39,6 +40,7 @@ const logout = () => {
     <el-button type="success" @click="goToInspection">巡检录入</el-button>
     <el-button type="info" @click="goToRecords">记录查询</el-button>
     <el-button v-if="authStore.isSuperAdmin" type="warning" @click="goToUsers">用户管理</el-button>
+    <el-button v-if="authStore.isSuperAdmin" type="success" @click="goToDict">厂区字典</el-button>
     <el-button type="danger" @click="goToExceptions">异常签核</el-button>
     <p v-if="apiStatus">后端状态：{{ apiStatus }}</p>
   </div>
