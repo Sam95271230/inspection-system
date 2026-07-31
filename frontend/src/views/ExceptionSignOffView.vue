@@ -11,6 +11,7 @@ import {
   reprocessException
 } from '@/api/exception'
 import { getUserList } from '@/api/user'
+import { Hide } from '@element-plus/icons-vue'
 
 
 // 状态映射
@@ -40,6 +41,8 @@ const actionForm = reactive({
 const detailVisible = ref(false)
 const currentDetail = ref<any>(null)
 const historyList = ref<any[]>([])
+const inspectionImages = ref<any[]>([])
+const detailLoading = ref(false)
 
 const fetchList = async () => {
   loading.value = true
@@ -115,8 +118,23 @@ const submitAction = async () => {
 const openDetail = async (row: any) => {
   currentDetail.value = row
   detailVisible.value = true
-  const res: any = await getExceptionHistory(row.id)
-  historyList.value = res || []
+  detailLoading.value = true
+  inspectionImages.value = []
+  historyList.value = []
+  try {
+    const res: any = await getExceptionHistory(row.id)
+    // 新接口返回 { history, images, inspection_id, serial_no }
+    if (Array.isArray(res)) {
+      historyList.value = res
+    } else {
+      historyList.value = res.history || []
+      inspectionImages.value = res.images || []
+    }
+  } catch (error) {
+    console.error(error)
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 const getActions = (row: any) => {
@@ -138,6 +156,14 @@ const getActions = (row: any) => {
   }
 
   return actions
+}
+
+const imagePreviewVisible = ref(false)
+const imagePreviewUrl = ref('')
+
+const openImagePreview = (url: string) => {
+  imagePreviewUrl.value = url
+  imagePreviewVisible.value = true
 }
 
 onMounted(() => {
@@ -216,7 +242,7 @@ onMounted(() => {
     </el-dialog>
 
     <!-- 详情弹窗 -->
-    <el-dialog v-model="detailVisible" title="异常详情" width="700px">
+    <el-dialog v-model="detailVisible" title="异常详情" width="800px" v-loading="detailLoading">
       <div v-if="currentDetail">
         <el-descriptions :column="2" border>
           <el-descriptions-item label="巡检单号">{{ currentDetail.serial_no }}</el-descriptions-item>
@@ -225,8 +251,38 @@ onMounted(() => {
           <el-descriptions-item label="当前处理人">{{ currentDetail.current_assignee_name || '-' }}</el-descriptions-item>
         </el-descriptions>
 
-        <h4 class="timeline-title">处理时间轴</h4>
-        <el-timeline>
+        <!-- 巡检证据图片 -->
+        <div v-if="inspectionImages.length > 0" class="images-section">
+          <h4 class="section-title">巡检证据图片</h4>
+          <div class="image-gallery">
+            <div
+              v-for="img in inspectionImages"
+              :key="img.id"
+              class="image-item"
+              @click="openImagePreview(img.url)"
+            >
+              <el-image
+                :src="img.url"
+                fit="cover"
+                class="inspection-image"
+                :preview-src-list="inspectionImages.map(i => i.url)"
+                :initial-index="inspectionImages.findIndex(i => i.id === img.id)"
+                preview-teleported
+              >
+                <template #error>
+                  <div class="image-error">
+                    <el-icon><Hide /></el-icon>
+                    <span>加载失败</span>
+                  </div>
+                </template>
+              </el-image>
+              <div class="image-name">{{ img.file_name }}</div>
+            </div>
+          </div>
+        </div>
+
+        <h4 class="section-title">处理时间轴</h4>
+        <el-timeline v-if="historyList.length > 0">
           <el-timeline-item
             v-for="(item, index) in historyList"
             :key="index"
@@ -243,6 +299,14 @@ onMounted(() => {
             </div>
           </el-timeline-item>
         </el-timeline>
+        <el-empty v-else description="暂无处理记录" :image-size="60" />
+      </div>
+    </el-dialog>
+
+    <!-- 图片预览弹窗 -->
+    <el-dialog v-model="imagePreviewVisible" title="图片预览" width="80%" :close-on-click-modal="true">
+      <div style="text-align: center;">
+        <img :src="imagePreviewUrl" style="max-width: 100%; max-height: 70vh;" />
       </div>
     </el-dialog>
   </div>
@@ -250,7 +314,7 @@ onMounted(() => {
 
 <style scoped>
 .exception-page {
-  padding: 16px;
+  padding: 0;
 }
 .page-header {
   font-size: 18px;
@@ -261,8 +325,55 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
 }
-.timeline-title {
+.section-title {
   margin: 20px 0 12px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #eee;
+  font-size: 15px;
+}
+.images-section {
+  margin-top: 16px;
+}
+.image-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.image-item {
+  width: 150px;
+  cursor: pointer;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: transform 0.2s;
+}
+.image-item:hover {
+  transform: scale(1.05);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+}
+.inspection-image {
+  width: 150px;
+  height: 120px;
+  display: block;
+}
+.image-name {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #909399;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  color: #c0c4cc;
+  font-size: 12px;
+  gap: 6px;
 }
 .timeline-content {
   padding: 8px 12px;

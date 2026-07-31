@@ -1,16 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
+import os
 
 from app.database import get_db
 from app.models.exception import ExceptionTicket, ExceptionHistory
-from app.models.inspection import Inspection
+from app.models.inspection import Inspection, InspectionImage
 from app.models.user import SysUser
 from app.models.plant_dict import Plant
 from app.utils.response import success
 from app.dependencies import get_current_user
+from app.utils.minio_client import get_minio_client
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/exceptions", tags=["异常签核"])
@@ -58,6 +60,141 @@ async def add_history(db, ticket_id, from_status, to_status, operator_id, action
     )
     db.add(history)
     await db.flush()
+
+
+async def _get_inspection_images(db, inspection_id) -> list:
+    """获取巡检记录关联的图片 URL 列表"""
+    result = await db.execute(
+        select(InspectionImage).where(InspectionImage.inspection_id == inspection_id)
+    )
+    images = result.scalars().all()
+    if not images:
+        return []
+
+    minio_client = get_minio_client()
+    bucket = os.getenv("MINIO_BUCKET", "inspection-images")
+    external_url = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+
+    image_urls = []
+    for img in images:
+        url = f"{external_url}/{bucket}/{img.storage_key}"
+        image_urls.append({
+            "id": str(img.id),
+            "file_name": img.file_name,
+            "url": url,
+            "sort_order": img.sort_order,
+        })
+
+    return image_urls
+
+
+async def _send_mail_notification(to_email: str, subject: str, body: str):
+    """发送邮件通知（后台任务），无邮件配置时静默跳过"""
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = os.getenv("SMTP_PORT", "587")
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+
+    if not all([smtp_host, smtp_user, smtp_password]):
+        return
+
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        msg = MIMEMultipart()
+        msg["From"] = smtp_user
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "html", "utf-8"))
+
+        with smtplib.SMTP(smtp_host, int(smtp_port), timeout=10) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [to_email], msg.as_string())
+        print(f"[邮件] 已发送至 {to_email}: {subject}")
+    except Exception as e:
+        print(f"[邮件] 发送失败: {e}")
+
+
+async def _get_ticket_info(db, ticket: ExceptionTicket) -> dict:
+    """获取异常单的完整上下文信息"""
+    insp_result = await db.execute(
+        select(Inspection).where(Inspection.id == ticket.inspection_id)
+    )
+    insp = insp_result.scalar_one_or_none()
+
+    plant_result = await db.execute(
+        select(Plant).where(Plant.id == ticket.plant_id)
+    )
+    plant = plant_result.scalar_one_or_none()
+
+    return {
+        "serial_no": insp.serial_no if insp else "N/A",
+        "ip_address": insp.ip_address if insp else "N/A",
+        "plant_name": plant.name if plant else "N/A",
+        "title": ticket.title,
+    }
+
+
+async def _notify_exception_updated(db, ticket, action_name, operator):
+    """根据状态变更发送邮件通知相关用户"""
+    info = await _get_ticket_info(db, ticket)
+
+    # 排除当前操作者之外，根据需要通知相关人
+    notify_users = []
+
+    if ticket.status == ExceptionStatus.PROCESSING and ticket.current_assignee_id:
+        # 分配给处理人时通知处理人
+        result = await db.execute(
+            select(SysUser).where(SysUser.id == ticket.current_assignee_id)
+        )
+        assignee = result.scalar_one_or_none()
+        if assignee and assignee.email and str(assignee.id) != str(operator.id):
+            notify_users.append(assignee)
+    elif ticket.status == ExceptionStatus.PENDING_SIGNOFF:
+        # 提交处理结果后通知所有管理员
+        result = await db.execute(
+            select(SysUser).where(SysUser.is_superadmin.is_(True), SysUser.email.isnot(None))
+        )
+        admins = result.scalars().all()
+        for admin in admins:
+            if str(admin.id) != str(operator.id):
+                notify_users.append(admin)
+    elif ticket.status in (ExceptionStatus.CLOSED, ExceptionStatus.REJECTED):
+        # 签核/驳回后通知最初提交人
+        result = await db.execute(
+            select(ExceptionHistory)
+            .where(ExceptionHistory.ticket_id == ticket.id)
+            .order_by(ExceptionHistory.created_at)
+            .limit(1)
+        )
+        first_history = result.scalar_one_or_none()
+        if first_history:
+            submitter_result = await db.execute(
+                select(SysUser).where(SysUser.id == first_history.operator_id, SysUser.email.isnot(None))
+            )
+            submitter = submitter_result.scalar_one_or_none()
+            if submitter and str(submitter.id) != str(operator.id):
+                notify_users.append(submitter)
+
+    # 发送邮件
+    for user in notify_users:
+        subject = f"[巡检系统] 异常单 {info['serial_no']} - {action_name}"
+        body = f"""
+        <h3>异常单状态更新</h3>
+        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse">
+          <tr><td><b>巡检单号</b></td><td>{info['serial_no']}</td></tr>
+          <tr><td><b>IP 地址</b></td><td>{info['ip_address']}</td></tr>
+          <tr><td><b>厂区</b></td><td>{info['plant_name']}</td></tr>
+          <tr><td><b>异常摘要</b></td><td>{info['title']}</td></tr>
+          <tr><td><b>当前状态</b></td><td>{ticket.status}</td></tr>
+          <tr><td><b>操作人</b></td><td>{operator.real_name or operator.username}</td></tr>
+        </table>
+        <p>请登录巡检系统查看详情。</p>
+        """
+        await _send_mail_notification(user.email, subject, body)
 
 
 @router.get("")
@@ -145,9 +282,14 @@ async def get_exception(
     if not ticket:
         raise HTTPException(status_code=404, detail="异常单不存在")
 
+    insp_result = await db.execute(select(Inspection).where(Inspection.id == ticket.inspection_id))
+    insp = insp_result.scalar_one_or_none()
+
     return success({
         "id": str(ticket.id),
         "inspection_id": str(ticket.inspection_id),
+        "serial_no": insp.serial_no if insp else None,
+        "ip_address": insp.ip_address if insp else None,
         "plant_id": str(ticket.plant_id),
         "title": ticket.title,
         "status": ticket.status,
@@ -161,6 +303,15 @@ async def get_exception_history(
     ticket_id: str,
     db: AsyncSession = Depends(get_db)
 ):
+    result = await db.execute(select(ExceptionTicket).where(ExceptionTicket.id == ticket_id))
+    ticket = result.scalar_one_or_none()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="异常单不存在")
+
+    # 获取巡检图片（与异常单关联的原始巡检记录图片）
+    inspection_images = await _get_inspection_images(db, ticket.inspection_id)
+
+    # 获取历史记录
     result = await db.execute(
         select(ExceptionHistory)
         .where(ExceptionHistory.ticket_id == ticket_id)
@@ -190,13 +341,19 @@ async def get_exception_history(
             "created_at": h.created_at.isoformat() if h.created_at else None,
         })
 
-    return success(data)
+    return success({
+        "history": data,
+        "images": inspection_images,
+        "inspection_id": str(ticket.inspection_id),
+        "serial_no": ticket.title,
+    })
 
 
 @router.post("/{ticket_id}/assign")
 async def assign_exception(
     ticket_id: str,
     req: AssignRequest,
+    background_tasks: BackgroundTasks,
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -220,6 +377,10 @@ async def assign_exception(
         current_user.id, "ASSIGN", req.remark, []
     )
     await db.commit()
+    await db.refresh(ticket)
+
+    # 邮件通知处理人
+    background_tasks.add_task(_notify_exception_updated, db, ticket, "已分配处理人", current_user)
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -228,6 +389,7 @@ async def assign_exception(
 async def process_exception(
     ticket_id: str,
     req: ProcessRequest,
+    background_tasks: BackgroundTasks,
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -250,6 +412,10 @@ async def process_exception(
         current_user.id, "PROCESS", req.remark, req.attachment_urls
     )
     await db.commit()
+    await db.refresh(ticket)
+
+    # 邮件通知管理员签核
+    background_tasks.add_task(_notify_exception_updated, db, ticket, "待签核", current_user)
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -258,6 +424,7 @@ async def process_exception(
 async def approve_exception(
     ticket_id: str,
     req: ApproveRequest,
+    background_tasks: BackgroundTasks,
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -277,6 +444,10 @@ async def approve_exception(
         current_user.id, "APPROVE", req.remark, []
     )
     await db.commit()
+    await db.refresh(ticket)
+
+    # 邮件通知提交人已签核通过
+    background_tasks.add_task(_notify_exception_updated, db, ticket, "签核通过", current_user)
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -285,6 +456,7 @@ async def approve_exception(
 async def reject_exception(
     ticket_id: str,
     req: RejectRequest,
+    background_tasks: BackgroundTasks,
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -304,6 +476,10 @@ async def reject_exception(
         current_user.id, "REJECT", req.remark, []
     )
     await db.commit()
+    await db.refresh(ticket)
+
+    # 邮件通知提交人已驳回
+    background_tasks.add_task(_notify_exception_updated, db, ticket, "签核驳回", current_user)
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -312,6 +488,7 @@ async def reject_exception(
 async def reprocess_exception(
     ticket_id: str,
     req: ReprocessRequest,
+    background_tasks: BackgroundTasks,
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -331,5 +508,9 @@ async def reprocess_exception(
         current_user.id, "REPROCESS", req.remark, []
     )
     await db.commit()
+    await db.refresh(ticket)
+
+    # 邮件通知处理人需重新处理
+    background_tasks.add_task(_notify_exception_updated, db, ticket, "重新处理", current_user)
 
     return success({"id": str(ticket.id), "status": ticket.status})

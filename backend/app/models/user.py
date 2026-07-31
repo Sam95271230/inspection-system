@@ -43,6 +43,7 @@ class SysUser(Base):
     username = Column(String(64), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     real_name = Column(String(64))
+    email = Column(String(128))
     mobile = Column(String(20))
     is_active = Column(Boolean, default=True)
     is_superadmin = Column(Boolean, default=False)
