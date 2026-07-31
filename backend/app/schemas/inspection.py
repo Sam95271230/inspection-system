@@ -8,10 +8,13 @@ class InspectionCreate(BaseModel):
     line_id: str
     station_id: str
     ip_address: str = Field(..., pattern=r'^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$')
+    machine_name: Optional[str] = None
     antivirus_status: str
     domain_status: str
     remark: Optional[str] = None
     status: Optional[str] = "SUBMITTED"
+    inspect_time: Optional[str] = None
+    inspector_name: Optional[str] = None
     images: Optional[List[dict]] = []
 
 

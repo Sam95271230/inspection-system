@@ -18,8 +18,11 @@ const form = reactive({
   line_id: '',
   station_id: '',
   ip_address: '',
+  machine_name: '',
   antivirus_status: 'NORMAL',
   domain_status: 'JOINED',
+  inspect_time: '',
+  inspector_name: '',
   remark: '',
   status: 'SUBMITTED',
   images: [] as any[]
@@ -153,7 +156,7 @@ const downloadBatchTemplate = () => {
     '    └── 3_1.jpg       (第3行第1张图)',
     '',
     '# Excel 表头格式 (records.xlsx)',
-    '厂区代码 | 线别代码 | 站别代码 | IP地址 | 防毒状态 | 入域状态 | 备注 | 图片数量',
+    '厂区代码 | 线别代码 | 站别代码 | IP地址 | 机器名 | 防毒状态 | 入域状态 | 巡检时间 | 巡检人 | 备注 | 图片数量',
     '',
     '# 状态值说明',
     '防毒状态: NORMAL(正常) / ABNORMAL(异常) / NOT_INSTALLED(未安装)',
@@ -233,6 +236,30 @@ onMounted(() => {
               <el-col :xs="24" :sm="12" :lg="8">
                 <el-form-item label="IP 地址" required>
                   <el-input v-model="form.ip_address" placeholder="例如：192.168.1.100" />
+                </el-form-item>
+              </el-col>
+
+              <el-col :xs="24" :sm="12" :lg="8">
+                <el-form-item label="机器名">
+                  <el-input v-model="form.machine_name" placeholder="请输入机器名" />
+                </el-form-item>
+              </el-col>
+
+              <el-col :xs="24" :sm="12" :lg="8">
+                <el-form-item label="巡检时间">
+                  <el-date-picker
+                    v-model="form.inspect_time"
+                    type="datetime"
+                    placeholder="请选择巡检时间"
+                    value-format="YYYY-MM-DDTHH:mm:ss"
+                    style="width: 100%"
+                  />
+                </el-form-item>
+              </el-col>
+
+              <el-col :xs="24" :sm="12" :lg="8">
+                <el-form-item label="巡检人">
+                  <el-input v-model="form.inspector_name" placeholder="请输入巡检人姓名" />
                 </el-form-item>
               </el-col>
 

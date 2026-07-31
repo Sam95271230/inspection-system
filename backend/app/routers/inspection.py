@@ -39,17 +39,29 @@ async def create_inspection(
     today = datetime.now().strftime("%Y%m%d")
     serial_no = f"INS-{today}-{uuid_module.uuid4().hex[:4].upper()}"
 
+    # 解析巡检时间
+    inspect_time = datetime.utcnow()
+    if data.inspect_time:
+        try:
+            inspect_time = datetime.fromisoformat(data.inspect_time.replace('Z', '+00:00'))
+            inspect_time = inspect_time.replace(tzinfo=None)
+        except Exception:
+            pass
+
     inspection = Inspection(
         serial_no=serial_no,
         plant_id=data.plant_id,
         line_id=data.line_id,
         station_id=data.station_id,
         ip_address=data.ip_address,
+        machine_name=data.machine_name or '',
         antivirus_status=data.antivirus_status,
         domain_status=data.domain_status,
         remark=data.remark,
         status=data.status,
-        inspector_id=current_user.id
+        inspector_id=current_user.id,
+        inspector_name=data.inspector_name or (current_user.real_name or current_user.username),
+        inspect_time=inspect_time
     )
     db.add(inspection)
     await db.flush()
@@ -224,7 +236,7 @@ async def batch_import_inspections(
     - images/ （可选，巡检证据图片文件夹）
     
     Excel 列（第一行为表头）：
-    厂区代码 | 线别代码 | 站别代码 | IP地址 | 防毒状态 | 入域状态 | 备注 | 图片数量
+    厂区代码 | 线别代码 | 站别代码 | IP地址 | 机器名 | 防毒状态 | 入域状态 | 巡检时间 | 巡检人 | 备注 | 图片数量
     
     图片命名规则：行号_序号.jpg，例如 2_1.jpg 表示第2行第1张图
     """
@@ -321,10 +333,12 @@ async def batch_import_inspections(
             line_code = extract_code(row[1]) if row[1] else None
             station_code = extract_code(row[2]) if row[2] else None
             ip_address = str(row[3]).strip() if row[3] else None
-            antivirus_status = str(row[4]).strip() if row[4] else "NORMAL"
-            domain_status = str(row[5]).strip() if row[5] else "JOINED"
-            remark = str(row[6]).strip() if row[6] else None
-            _img_count = row[7]  # 图片数量（仅作参考）
+            machine_name = str(row[4]).strip() if len(row) > 4 and row[4] else ''
+            antivirus_status = str(row[5]).strip() if len(row) > 5 and row[5] else "NORMAL"
+            domain_status = str(row[6]).strip() if len(row) > 6 and row[6] else "JOINED"
+            inspect_time_str = str(row[7]).strip() if len(row) > 7 and row[7] else None
+            inspector_name = str(row[8]).strip() if len(row) > 8 and row[8] else None
+            remark = str(row[9]).strip() if len(row) > 9 and row[9] else None
 
             if not plant_code or not line_code or not station_code or not ip_address:
                 stats["errors"] += 1
@@ -357,17 +371,32 @@ async def batch_import_inspections(
 
             serial_no = f"INS-{today}-{uuid_module.uuid4().hex[:4].upper()}"
 
+            # 解析巡检时间
+            inspect_time = datetime.utcnow()
+            if inspect_time_str:
+                try:
+                    inspect_time = datetime.fromisoformat(inspect_time_str.replace('Z', '+00:00'))
+                    inspect_time = inspect_time.replace(tzinfo=None)
+                except Exception:
+                    try:
+                        inspect_time = datetime.strptime(inspect_time_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+
             inspection = Inspection(
                 serial_no=serial_no,
                 plant_id=plant_id,
                 line_id=line_id,
                 station_id=station_id,
                 ip_address=ip_address,
+                machine_name=machine_name,
                 antivirus_status=antivirus_status,
                 domain_status=domain_status,
                 remark=remark,
                 status="SUBMITTED",
-                inspector_id=current_user.id
+                inspector_id=current_user.id,
+                inspector_name=inspector_name or (current_user.real_name or current_user.username),
+                inspect_time=inspect_time
             )
             db.add(inspection)
             await db.flush()
