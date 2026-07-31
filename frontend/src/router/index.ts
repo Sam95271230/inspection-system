@@ -42,6 +42,12 @@ const routes = [
     name: 'DictManagement',
     component: () => import('@/views/DictManagementView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
+  },
+  {
+    path: '/email',
+    name: 'EmailConfig',
+    component: () => import('@/views/EmailConfigView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
   }
 ]
 

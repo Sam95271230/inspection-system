@@ -13,6 +13,7 @@ from app.models.plant_dict import Plant
 from app.utils.response import success
 from app.dependencies import get_current_user
 from app.utils.minio_client import get_minio_client
+from app.routers.email_config import get_active_email_config, _send_email as send_mail
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/exceptions", tags=["异常签核"])
@@ -88,31 +89,14 @@ async def _get_inspection_images(db, inspection_id) -> list:
     return image_urls
 
 
-async def _send_mail_notification(to_email: str, subject: str, body: str):
+async def _send_mail_notification(db, to_email: str, subject: str, body: str):
     """发送邮件通知（后台任务），无邮件配置时静默跳过"""
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_port = os.getenv("SMTP_PORT", "587")
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-
-    if not all([smtp_host, smtp_user, smtp_password]):
+    config = await get_active_email_config(db)
+    if not config:
         return
 
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-
-        msg = MIMEMultipart()
-        msg["From"] = smtp_user
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "html", "utf-8"))
-
-        with smtplib.SMTP(smtp_host, int(smtp_port), timeout=10) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.sendmail(smtp_user, [to_email], msg.as_string())
+        send_mail(config, to_email, subject, body)
         print(f"[邮件] 已发送至 {to_email}: {subject}")
     except Exception as e:
         print(f"[邮件] 发送失败: {e}")
@@ -194,7 +178,7 @@ async def _notify_exception_updated(db, ticket, action_name, operator):
         </table>
         <p>请登录巡检系统查看详情。</p>
         """
-        await _send_mail_notification(user.email, subject, body)
+        await _send_mail_notification(db, user.email, subject, body)
 
 
 @router.get("")

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.utils.minio_client import ensure_bucket_exists
-from app.routers import auth, plant_dict, inspection, user, role, exception
+from app.routers import auth, plant_dict, inspection, user, role, exception, email_config
 
 
 @asynccontextmanager
@@ -32,6 +32,7 @@ app.include_router(inspection.router, prefix="/api/v1")
 app.include_router(user.router, prefix="/api/v1")
 app.include_router(role.router, prefix="/api/v1")
 app.include_router(exception.router, prefix="/api/v1")
+app.include_router(email_config.router, prefix="/api/v1")
 
 @app.get("/api/v1/health")
 def health_check():

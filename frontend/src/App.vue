@@ -9,6 +9,7 @@ import {
   WarningFilled,
   Setting,
   User,
+  Message,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -27,6 +28,7 @@ const menuItems = computed(() => {
     items.push(
       { path: '/dict', title: '厂区字典', icon: Setting },
       { path: '/users', title: '用户管理', icon: User },
+      { path: '/email', title: '邮件配置', icon: Message },
     )
   }
   return items
