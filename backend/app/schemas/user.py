@@ -11,6 +11,7 @@ class UserCreate(BaseModel):
     username: str
     password: str
     real_name: Optional[str] = None
+    email: Optional[str] = None
     mobile: Optional[str] = None
     is_active: bool = True
     is_superadmin: bool = False
@@ -20,6 +21,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     real_name: Optional[str] = None
+    email: Optional[str] = None
     mobile: Optional[str] = None
     is_active: Optional[bool] = None
     is_superadmin: Optional[bool] = None

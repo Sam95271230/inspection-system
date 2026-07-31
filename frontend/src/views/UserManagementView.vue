@@ -23,6 +23,7 @@ const form = reactive({
   username: '',
   password: '',
   real_name: '',
+  email: '',
   mobile: '',
   is_active: true,
   is_superadmin: false,
@@ -62,6 +63,7 @@ const openEdit = (row: any) => {
   form.username = row.username
   form.password = ''
   form.real_name = row.real_name || ''
+  form.email = row.email || ''
   form.mobile = row.mobile || ''
   form.is_active = row.is_active
   form.is_superadmin = row.is_superadmin
@@ -75,6 +77,7 @@ const resetForm = () => {
   form.username = ''
   form.password = ''
   form.real_name = ''
+  form.email = ''
   form.mobile = ''
   form.is_active = true
   form.is_superadmin = false
@@ -95,6 +98,7 @@ const handleSave = async () => {
   const data: any = {
     username: form.username,
     real_name: form.real_name,
+    email: form.email,
     mobile: form.mobile,
     is_active: form.is_active,
     is_superadmin: form.is_superadmin,
@@ -173,16 +177,24 @@ onMounted(() => {
       </template>
 
       <el-table :data="users" v-loading="loading" border stripe>
-        <el-table-column prop="username" label="用户名" />
-        <el-table-column prop="real_name" label="姓名" />
-        <el-table-column prop="mobile" label="手机号" />
-        <el-table-column label="角色">
+        <el-table-column prop="username" label="用户名" width="120" />
+        <el-table-column prop="real_name" label="姓名" width="100" />
+        <el-table-column prop="email" label="邮件地址" width="180" />
+        <el-table-column prop="mobile" label="手机号" width="130" />
+        <el-table-column label="角色" width="160">
           <template #default="{ row }">
-            <span v-if="row.is_superadmin">超级管理员</span>
-            <span v-else>普通用户</span>
+            <template v-if="row.is_superadmin">
+              <el-tag type="danger">超级管理员</el-tag>
+            </template>
+            <template v-else-if="row.role_names?.length">
+              <el-tag v-for="name in row.role_names" :key="name" size="small" style="margin-right: 4px;">
+                {{ name }}
+              </el-tag>
+            </template>
+            <span v-else class="no-permission">无角色</span>
           </template>
         </el-table-column>
-        <el-table-column label="授权厂区">
+        <el-table-column label="授权厂区" min-width="200">
           <template #default="{ row }">
             <el-tag v-if="row.is_superadmin" type="success">全部厂区</el-tag>
             <template v-else>
@@ -193,7 +205,7 @@ onMounted(() => {
             </template>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" width="80">
           <template #default="{ row }">
             <el-tag :type="row.is_active ? 'success' : 'danger'">
               {{ row.is_active ? '启用' : '禁用' }}
@@ -223,11 +235,14 @@ onMounted(() => {
         <el-form-item label="姓名">
           <el-input v-model="form.real_name" />
         </el-form-item>
+        <el-form-item label="邮件地址">
+          <el-input v-model="form.email" placeholder="用于接收签核通知等" />
+        </el-form-item>
         <el-form-item label="手机号">
           <el-input v-model="form.mobile" />
         </el-form-item>
         <el-form-item label="角色">
-          <el-select v-model="form.role_ids" multiple style="width: 100%">
+          <el-select v-model="form.role_ids" multiple style="width: 100%" placeholder="请选择角色">
             <el-option v-for="role in roles" :key="role.id" :label="role.name" :value="role.id" />
           </el-select>
         </el-form-item>
@@ -255,7 +270,7 @@ onMounted(() => {
 
 <style scoped>
 .user-management-page {
-  padding: 16px;
+  padding: 0;
 }
 .page-header {
   display: flex;

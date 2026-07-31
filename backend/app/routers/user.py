@@ -15,6 +15,46 @@ from app.dependencies import get_current_user, require_superadmin
 router = APIRouter(prefix="/users", tags=["用户管理"])
 
 
+async def _get_user_roles(db, user_id: str) -> list:
+    """获取用户的角色信息（role_ids + role_names）"""
+    result = await db.execute(
+        select(user_role.c.role_id).where(user_role.c.user_id == user_id)
+    )
+    role_ids = [str(r[0]) for r in result.all()]
+    role_names = []
+    if role_ids:
+        role_result = await db.execute(
+            select(Role).where(Role.id.in_([r[0] for r in result.all()]))
+        )
+        role_names = [r.name for r in role_result.scalars().all()]
+    return role_ids, role_names
+
+
+async def _get_user_plants(db, user_id: str) -> list:
+    result = await db.execute(
+        select(user_plant.c.plant_id).where(user_plant.c.user_id == user_id)
+    )
+    return [str(p[0]) for p in result.all()]
+
+
+async def _build_user_response(db, user: SysUser) -> dict:
+    role_ids, role_names = await _get_user_roles(db, user.id)
+    plant_ids = await _get_user_plants(db, user.id)
+    return {
+        "id": str(user.id),
+        "username": user.username,
+        "real_name": user.real_name,
+        "email": user.email,
+        "mobile": user.mobile,
+        "is_active": user.is_active,
+        "is_superadmin": user.is_superadmin,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "role_ids": role_ids,
+        "role_names": role_names,
+        "plant_ids": plant_ids,
+    }
+
+
 @router.post("")
 async def create_user(
     data: UserCreate,
@@ -31,6 +71,7 @@ async def create_user(
         username=data.username,
         password_hash=get_password_hash(data.password),
         real_name=data.real_name,
+        email=data.email,
         mobile=data.mobile,
         is_active=data.is_active,
         is_superadmin=data.is_superadmin,
@@ -65,24 +106,8 @@ async def list_users(
 
     user_list = []
     for user in users:
-        role_result = await db.execute(
-            select(user_role.c.role_id).where(user_role.c.user_id == user.id)
-        )
-        plant_result = await db.execute(
-            select(user_plant.c.plant_id).where(user_plant.c.user_id == user.id)
-        )
-
-        user_list.append({
-            "id": str(user.id),
-            "username": user.username,
-            "real_name": user.real_name,
-            "mobile": user.mobile,
-            "is_active": user.is_active,
-            "is_superadmin": user.is_superadmin,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-            "role_ids": [str(r[0]) for r in role_result.all()],
-            "plant_ids": [str(p[0]) for p in plant_result.all()],
-        })
+        info = await _build_user_response(db, user)
+        user_list.append(info)
 
     return success({
         "list": user_list,
@@ -101,23 +126,7 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    role_result = await db.execute(
-        select(user_role.c.role_id).where(user_role.c.user_id == user.id)
-    )
-    plant_result = await db.execute(
-        select(user_plant.c.plant_id).where(user_plant.c.user_id == user.id)
-    )
-
-    return success({
-        "id": str(user.id),
-        "username": user.username,
-        "real_name": user.real_name,
-        "mobile": user.mobile,
-        "is_active": user.is_active,
-        "is_superadmin": user.is_superadmin,
-        "role_ids": [str(r[0]) for r in role_result.all()],
-        "plant_ids": [str(p[0]) for p in plant_result.all()],
-    })
+    return success(await _build_user_response(db, user))
 
 
 @router.put("/{user_id}")
@@ -134,6 +143,8 @@ async def update_user(
 
     if data.real_name is not None:
         user.real_name = data.real_name
+    if data.email is not None:
+        user.email = data.email
     if data.mobile is not None:
         user.mobile = data.mobile
     if data.is_active is not None:
