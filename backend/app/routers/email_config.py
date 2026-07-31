@@ -1,5 +1,7 @@
 import os
 import smtplib
+from email.header import Header
+from email.utils import formataddr
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -61,9 +63,10 @@ def _mask_password(pwd: str) -> str:
 def _send_email(config: EmailConfig, to_email: str, subject: str, body: str):
     """同步发送邮件，支持 TLS/SSL 两种模式"""
     msg = MIMEMultipart()
-    msg["From"] = f"{config.from_name} <{config.smtp_user}>"
+    # 中文发件人名称需 RFC 2047 编码
+    msg["From"] = formataddr((config.from_name, config.smtp_user))
     msg["To"] = to_email
-    msg["Subject"] = subject
+    msg["Subject"] = Header(subject, "utf-8")
     msg.attach(MIMEText(body, "html", "utf-8"))
 
     last_error = None
