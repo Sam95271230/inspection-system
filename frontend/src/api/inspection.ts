@@ -19,6 +19,12 @@ export const importDict = (file: File) => {
   return request.post('/dict/import', formData)
 }
 
+export const batchImportInspections = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post('/inspections/batch-import', formData)
+}
+
 export const exportInspections = async (params: any) => {
   const response = await axios.get('/api/v1/inspections/export', {
     params,

@@ -7,12 +7,14 @@ from datetime import datetime
 import uuid as uuid_module
 import os
 import io
+import zipfile
 from urllib.parse import quote
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker, XDRPositiveSize2D
+from openpyxl import load_workbook
 from PIL import Image
 
 from app.database import get_db
@@ -123,6 +125,35 @@ async def list_inspections(
     if end_time:
         stmt = stmt.where(Inspection.inspect_time <= end_time)
 
+    # 同时查询总数
+    count_stmt = select(Inspection)
+    # 对 count_stmt 应用相同的过滤条件
+    if not current_user.is_superadmin:
+        if not authorized_plant_ids:
+            count_stmt = count_stmt.where(Inspection.plant_id.in_([]))
+        else:
+            count_stmt = count_stmt.where(Inspection.plant_id.in_(authorized_plant_ids))
+    if plant_id:
+        count_stmt = count_stmt.where(Inspection.plant_id == plant_id)
+    if line_id:
+        count_stmt = count_stmt.where(Inspection.line_id == line_id)
+    if station_id:
+        count_stmt = count_stmt.where(Inspection.station_id == station_id)
+    if antivirus_status:
+        count_stmt = count_stmt.where(Inspection.antivirus_status == antivirus_status)
+    if domain_status:
+        count_stmt = count_stmt.where(Inspection.domain_status == domain_status)
+    if start_time:
+        count_stmt = count_stmt.where(Inspection.inspect_time >= start_time)
+    if end_time:
+        count_stmt = count_stmt.where(Inspection.inspect_time <= end_time)
+
+    # 先获取总数
+    total_result = await db.execute(select(
+        __import__('sqlalchemy').func.count()
+    ).select_from(count_stmt.subquery()))
+    total = total_result.scalar() or 0
+
     offset = (page - 1) * page_size
     result = await db.execute(stmt.offset(offset).limit(page_size))
     inspections = result.scalars().all()
@@ -163,7 +194,7 @@ async def list_inspections(
             }
             for i in inspections
         ],
-        "total": len(inspections)
+        "total": total
     })
 
 
@@ -176,6 +207,208 @@ async def upload_inspection_image(file: UploadFile = File(...)):
         "url": url,
         "storage_key": object_name,
         "name": file.filename
+    })
+
+
+@router.post("/batch-import")
+async def batch_import_inspections(
+    file: UploadFile = File(...),
+    current_user: SysUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    批量导入巡检记录（ZIP 包）
+    
+    ZIP 包结构：
+    - records.xlsx （Excel 数据文件）
+    - images/ （可选，巡检证据图片文件夹）
+    
+    Excel 列（第一行为表头）：
+    厂区代码 | 线别代码 | 站别代码 | IP地址 | 防毒状态 | 入域状态 | 备注 | 图片数量
+    
+    图片命名规则：行号_序号.jpg，例如 2_1.jpg 表示第2行第1张图
+    """
+    if not file.filename.endswith('.zip'):
+        return success(code=400, message="请上传 ZIP 压缩包")
+
+    content = await file.read()
+    zf = zipfile.ZipFile(io.BytesIO(content))
+    file_list = zf.namelist()
+
+    # 查找 Excel 文件
+    excel_name = None
+    for f in file_list:
+        if f.endswith('.xlsx') and not f.startswith('__MACOSX'):
+            excel_name = f
+            break
+
+    if not excel_name:
+        return success(code=400, message="ZIP 包中未找到 .xlsx 文件")
+
+    # 读取 Excel
+    excel_data = zf.read(excel_name)
+    wb = load_workbook(io.BytesIO(excel_data), data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(min_row=2, values_only=True))  # 跳过表头
+
+    # 读取图片映射
+    image_map = {}
+    for f in file_list:
+        if f.startswith('images/') and not f.endswith('/'):
+            # 解析文件名：行号_序号.jpg
+            try:
+                base = f.replace('images/', '').replace('\\', '/')
+                parts = base.rsplit('.', 1)[0].split('_')
+                row_num = int(parts[0])
+                if row_num not in image_map:
+                    image_map[row_num] = []
+                image_map[row_num].append((f, base))
+            except (ValueError, IndexError):
+                continue
+
+    stats = {"created": 0, "errors": 0, "images": 0}
+    today = datetime.now().strftime("%Y%m%d")
+    minio_client = get_minio_client()
+    bucket = os.getenv("MINIO_BUCKET", "inspection-images")
+
+    # 预处理：收集厂区线别站别 code -> id 映射
+    plant_codes = set()
+    line_codes = set()
+    station_codes = set()
+    for row in rows:
+        if row[0]:
+            plant_codes.add(str(row[0]).strip())
+        if row[1]:
+            line_codes.add(str(row[1]).strip())
+        if row[2]:
+            station_codes.add(str(row[2]).strip())
+
+    plant_map = {}
+    if plant_codes:
+        result = await db.execute(select(Plant).where(Plant.code.in_(plant_codes)))
+        for p in result.scalars().all():
+            plant_map[p.code] = p.id
+
+    line_map = {}
+    if line_codes:
+        result = await db.execute(select(Line).where(Line.code.in_(line_codes)))
+        for l in result.scalars().all():
+            line_map[l.code] = l.id
+
+    station_map = {}
+    if station_codes:
+        result = await db.execute(select(Station).where(Station.code.in_(station_codes)))
+        for s in result.scalars().all():
+            station_map[s.code] = s.id
+
+    for row_idx, row in enumerate(rows):
+        try:
+            plant_code = str(row[0]).strip() if row[0] else None
+            line_code = str(row[1]).strip() if row[1] else None
+            station_code = str(row[2]).strip() if row[2] else None
+            ip_address = str(row[3]).strip() if row[3] else None
+            antivirus_status = str(row[4]).strip() if row[4] else "NORMAL"
+            domain_status = str(row[5]).strip() if row[5] else "JOINED"
+            remark = str(row[6]).strip() if row[6] else None
+            _img_count = row[7]  # 图片数量（仅作参考）
+
+            if not plant_code or not line_code or not station_code or not ip_address:
+                stats["errors"] += 1
+                continue
+
+            plant_id = plant_map.get(plant_code)
+            line_id = line_map.get(line_code)
+            station_id = station_map.get(station_code)
+
+            if not plant_id or not line_id or not station_id:
+                stats["errors"] += 1
+                continue
+
+            # IP 地址校验
+            ip_parts = ip_address.split('.')
+            if len(ip_parts) != 4:
+                stats["errors"] += 1
+                continue
+
+            # 状态标准化
+            if antivirus_status not in ("NORMAL", "ABNORMAL", "NOT_INSTALLED"):
+                antivirus_status_map = {"正常": "NORMAL", "异常": "ABNORMAL", "未安装": "NOT_INSTALLED"}
+                antivirus_status = antivirus_status_map.get(antivirus_status, "NORMAL")
+
+            if domain_status not in ("JOINED", "NOT_JOINED", "NOT_APPLICABLE"):
+                domain_status_map = {"已入域": "JOINED", "未入域": "NOT_JOINED", "不适用": "NOT_APPLICABLE"}
+                domain_status = domain_status_map.get(domain_status, "JOINED")
+
+            serial_no = f"INS-{today}-{uuid_module.uuid4().hex[:4].upper()}"
+
+            inspection = Inspection(
+                serial_no=serial_no,
+                plant_id=plant_id,
+                line_id=line_id,
+                station_id=station_id,
+                ip_address=ip_address,
+                antivirus_status=antivirus_status,
+                domain_status=domain_status,
+                remark=remark,
+                status="SUBMITTED",
+                inspector_id=current_user.id
+            )
+            db.add(inspection)
+            await db.flush()
+
+            # 处理巡检证据图片
+            excel_row_num = row_idx + 2  # Excel 行号（第1行是表头）
+            if excel_row_num in image_map:
+                for img_path, img_name in image_map[excel_row_num]:
+                    try:
+                        img_data = zf.read(img_path)
+                        object_name = f"inspection/{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid_module.uuid4().hex[:6]}_{img_name}"
+
+                        minio_client.put_object(
+                            bucket,
+                            object_name,
+                            data=io.BytesIO(img_data),
+                            length=len(img_data),
+                            content_type="image/jpeg"
+                        )
+
+                        image = InspectionImage(
+                            inspection_id=inspection.id,
+                            file_name=img_name,
+                            storage_key=object_name,
+                            mime_type="image/jpeg"
+                        )
+                        db.add(image)
+                        stats["images"] += 1
+                    except Exception:
+                        pass  # 单张图片失败不中断
+
+            # 异常自动建单
+            if antivirus_status == "ABNORMAL" or domain_status == "NOT_JOINED":
+                title_parts = []
+                if antivirus_status == "ABNORMAL":
+                    title_parts.append("防毒软件异常")
+                if domain_status == "NOT_JOINED":
+                    title_parts.append("未入域")
+                title = " - ".join(title_parts)
+
+                exception_ticket = ExceptionTicket(
+                    inspection_id=inspection.id,
+                    plant_id=plant_id,
+                    title=title,
+                    status="PENDING"
+                )
+                db.add(exception_ticket)
+
+            stats["created"] += 1
+        except Exception:
+            stats["errors"] += 1
+
+    await db.commit()
+
+    return success({
+        "message": f"导入完成：成功 {stats['created']} 条，失败 {stats['errors']} 条，图片 {stats['images']} 张",
+        "stats": stats
     })
 
 
@@ -310,7 +543,7 @@ async def export_inspections(
         bottom=Side(style="thin"),
     )
 
-    # 表头（新增"巡检证据"列）
+    # 表头
     headers = ["巡检单号", "厂区", "线别", "站别", "IP地址", "防毒软件状态", "入域状态", "备注", "巡检时间", "巡检人", "巡检证据"]
     for col_idx, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
@@ -319,15 +552,14 @@ async def export_inspections(
         cell.alignment = header_alignment
         cell.border = thin_border
 
-    # 初始化 MinIO 客户端（用于下载巡检证据图片）
+    # 初始化 MinIO 客户端
     minio_client = get_minio_client()
     bucket_name = os.getenv("MINIO_BUCKET", "inspection-images")
 
     # 图片嵌入配置
-    IMG_TARGET_HEIGHT = 90  # 像素，图片缩放后的高度
-    IMAGES_PER_ROW = 3      # 每行最多并排 3 张图片
-    IMG_GAP_PX = 4          # 图片间距（像素）
-    # 将像素宽度近似换算为 Excel 列宽单位（1 单位 ≈ 7 像素）
+    IMG_TARGET_HEIGHT = 90
+    IMAGES_PER_ROW = 3
+    IMG_GAP_PX = 4
     IMG_EMBED_WIDTH = (IMG_TARGET_HEIGHT * IMAGES_PER_ROW + IMG_GAP_PX * (IMAGES_PER_ROW + 1)) / 7.0
 
     # 数据行
@@ -344,37 +576,32 @@ async def export_inspections(
             inspection.inspect_time.strftime("%Y-%m-%d %H:%M:%S") if inspection.inspect_time else "",
             inspector_name_map.get(str(inspection.inspector_id), ""),
         ]
-        # 写入前 10 列文本数据
         for col_idx, value in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.font = Font(name="微软雅黑", size=10)
             cell.border = thin_border
-            if col_idx in (8,):  # 备注列左对齐
+            if col_idx in (8,):
                 cell.alignment = cell_alignment_left
             else:
                 cell.alignment = cell_alignment
 
-        # 第 11 列：嵌入巡检证据图片
         evidence_cell = ws.cell(row=row_idx, column=11)
         evidence_cell.border = thin_border
         evidence_cell.alignment = Alignment(horizontal="center", vertical="top")
 
         images = inspection.images
         if images:
-            # 计算该行的高度（根据图片行数）
             img_rows_count = (len(images) + IMAGES_PER_ROW - 1) // IMAGES_PER_ROW
             row_height_px = img_rows_count * (IMG_TARGET_HEIGHT + IMG_GAP_PX) + IMG_GAP_PX
-            ws.row_dimensions[row_idx].height = row_height_px * 0.75  # 像素转磅（约 0.75）
+            ws.row_dimensions[row_idx].height = row_height_px * 0.75
 
             for img_idx, inspection_image in enumerate(images):
                 try:
-                    # 从 MinIO 下载图片
                     img_obj = minio_client.get_object(bucket_name, inspection_image.storage_key)
                     img_bytes = img_obj.read()
                     img_obj.close()
                     img_obj.release_conn()
 
-                    # 用 Pillow 处理图片：缩放并转为 JPEG
                     pil_img = Image.open(io.BytesIO(img_bytes))
                     pil_img = pil_img.convert("RGB")
                     w, h = pil_img.size
@@ -385,24 +612,21 @@ async def export_inspections(
                     pil_img.save(img_stream, format="JPEG", quality=85)
                     img_stream.seek(0)
 
-                    # 计算图片在单元格中的锚点位置
                     img_col = img_idx % IMAGES_PER_ROW
                     img_row = img_idx // IMAGES_PER_ROW
                     offset_x = IMG_GAP_PX + img_col * (IMG_TARGET_HEIGHT + IMG_GAP_PX)
                     offset_y = IMG_GAP_PX + img_row * (IMG_TARGET_HEIGHT + IMG_GAP_PX)
 
-                    # 创建 openpyxl 图片对象并嵌入
                     xl_img = XLImage(img_stream)
                     xl_img.width = new_w
                     xl_img.height = IMG_TARGET_HEIGHT
 
-                    # 锚点：列偏移量（EMU，1像素 = 9525 EMU）
                     col_offset = int(offset_x * 9525)
                     row_offset = int(offset_y * 9525)
 
                     xl_img.anchor = OneCellAnchor(
                         _from=AnchorMarker(
-                            col=10,  # 第 11 列（从 0 开始）
+                            col=10,
                             colOff=col_offset,
                             row=row_idx - 1,
                             rowOff=row_offset,
@@ -412,27 +636,22 @@ async def export_inspections(
 
                     ws.add_image(xl_img)
                 except Exception:
-                    # 图片下载失败时写入占位文字
                     evidence_cell.value = (evidence_cell.value or "") + f"[图片加载失败] "
         else:
             evidence_cell.value = "无"
             ws.row_dimensions[row_idx].height = 30
 
-    # 设置列宽（第 11 列为巡检证据图片列）
     column_widths = [20, 22, 22, 22, 16, 16, 12, 30, 22, 14, IMG_EMBED_WIDTH]
     for col_idx, width in enumerate(column_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
-    # 冻结首行
     ws.freeze_panes = "A2"
 
-    # 写入内存流
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
 
     filename = f"巡检记录_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    # filename*=UTF-8'' 要求对中文文件名做百分号编码，因为 HTTP 头值必须为 latin-1 安全
     encoded_filename = quote(filename, safe='')
 
     return StreamingResponse(
