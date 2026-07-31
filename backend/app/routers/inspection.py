@@ -12,7 +12,8 @@ from urllib.parse import quote
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker, Ext
+from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+from openpyxl.drawing.geometry import Ext
 from PIL import Image
 
 from app.database import get_db
