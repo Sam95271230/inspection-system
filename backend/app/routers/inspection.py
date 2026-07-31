@@ -251,20 +251,25 @@ async def batch_import_inspections(
     ws = wb.active
     rows = list(ws.iter_rows(min_row=2, values_only=True))  # 跳过表头
 
-    # 读取图片映射
+    # 读取图片映射（支持多级路径和大小写）
     image_map = {}
     for f in file_list:
-        if f.startswith('images/') and not f.endswith('/'):
-            # 解析文件名：行号_序号.jpg
-            try:
-                base = f.replace('images/', '').replace('\\', '/')
-                parts = base.rsplit('.', 1)[0].split('_')
-                row_num = int(parts[0])
-                if row_num not in image_map:
-                    image_map[row_num] = []
-                image_map[row_num].append((f, base))
-            except (ValueError, IndexError):
-                continue
+        if f.endswith('/') or f.startswith('__MACOSX'):
+            continue
+        # 检查是否是图片文件
+        f_lower = f.lower()
+        if not (f_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'))):
+            continue
+        # 解析图片文件名：允许任意路径前缀，只要文件名格式为 行号_序号.jpg
+        try:
+            base = f.split('/')[-1].split('\\')[-1]  # 取纯文件名
+            parts = base.rsplit('.', 1)[0].split('_')
+            row_num = int(parts[0])
+            if row_num not in image_map:
+                image_map[row_num] = []
+            image_map[row_num].append((f, base))
+        except (ValueError, IndexError):
+            continue
 
     stats = {"created": 0, "errors": 0, "images": 0}
     today = datetime.now().strftime("%Y%m%d")
