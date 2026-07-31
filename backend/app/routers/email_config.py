@@ -89,9 +89,15 @@ def _send_email(config: EmailConfig, to_email: str, subject: str, body: str):
                     server.starttls()
                     server.ehlo()
                 server.login(config.smtp_user, config.smtp_password)
-            else:
+            elif port == 465:
+                # SSL 模式 (端口 465)
                 ctx = __import__('ssl').create_default_context()
                 server = smtplib.SMTP_SSL(config.smtp_host, port, timeout=15, context=ctx)
+                server.login(config.smtp_user, config.smtp_password)
+            else:
+                # 纯 SMTP 无加密（端口 25 等内网场景）
+                server = smtplib.SMTP(config.smtp_host, port, timeout=15)
+                server.ehlo()
                 server.login(config.smtp_user, config.smtp_password)
 
             server.sendmail(config.smtp_user, [to_email], msg.as_string())
