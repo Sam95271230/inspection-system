@@ -272,16 +272,25 @@ async def batch_import_inspections(
     bucket = os.getenv("MINIO_BUCKET", "inspection-images")
 
     # 预处理：收集厂区线别站别 code -> id 映射
+    # 支持格式：纯 code（如 P1）或 "code - name"（如 P1 - A厂区）
+    def extract_code(val):
+        raw = str(val).strip() if val else ""
+        # 去除括号及内容：如 "NORMAL(正常)" → "NORMAL"
+        raw = __import__('re').sub(r'\([^)]*\)', '', raw).strip()
+        # 取空格或 "-" 分隔的第一部分（支持纯 code 和 "P1 - A厂区" 格式）
+        parts = raw.split(None, 1)
+        return parts[0] if parts else raw
+
     plant_codes = set()
     line_codes = set()
     station_codes = set()
     for row in rows:
         if row[0]:
-            plant_codes.add(str(row[0]).strip())
+            plant_codes.add(extract_code(row[0]))
         if row[1]:
-            line_codes.add(str(row[1]).strip())
+            line_codes.add(extract_code(row[1]))
         if row[2]:
-            station_codes.add(str(row[2]).strip())
+            station_codes.add(extract_code(row[2]))
 
     plant_map = {}
     if plant_codes:
@@ -303,9 +312,9 @@ async def batch_import_inspections(
 
     for row_idx, row in enumerate(rows):
         try:
-            plant_code = str(row[0]).strip() if row[0] else None
-            line_code = str(row[1]).strip() if row[1] else None
-            station_code = str(row[2]).strip() if row[2] else None
+            plant_code = extract_code(row[0]) if row[0] else None
+            line_code = extract_code(row[1]) if row[1] else None
+            station_code = extract_code(row[2]) if row[2] else None
             ip_address = str(row[3]).strip() if row[3] else None
             antivirus_status = str(row[4]).strip() if row[4] else "NORMAL"
             domain_status = str(row[5]).strip() if row[5] else "JOINED"
@@ -330,11 +339,13 @@ async def batch_import_inspections(
                 stats["errors"] += 1
                 continue
 
-            # 状态标准化
+            # 状态标准化（支持带括号格式如 NORMAL(正常)、已入域 等）
+            antivirus_status = extract_code(antivirus_status)  # 去除括号
             if antivirus_status not in ("NORMAL", "ABNORMAL", "NOT_INSTALLED"):
                 antivirus_status_map = {"正常": "NORMAL", "异常": "ABNORMAL", "未安装": "NOT_INSTALLED"}
                 antivirus_status = antivirus_status_map.get(antivirus_status, "NORMAL")
 
+            domain_status = extract_code(domain_status)  # 去除括号
             if domain_status not in ("JOINED", "NOT_JOINED", "NOT_APPLICABLE"):
                 domain_status_map = {"已入域": "JOINED", "未入域": "NOT_JOINED", "不适用": "NOT_APPLICABLE"}
                 domain_status = domain_status_map.get(domain_status, "JOINED")
