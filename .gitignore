@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+.venv/
+venv/
+.env
+
+# Node.js / Frontend
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+docker-export/images.tar
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
