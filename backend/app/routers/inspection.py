@@ -12,8 +12,7 @@ from urllib.parse import quote
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
-from openpyxl.drawing.geometry import Ext
+from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker, XDRPositiveSize2D
 from PIL import Image
 
 from app.database import get_db
@@ -408,7 +407,7 @@ async def export_inspections(
                             row=row_idx - 1,
                             rowOff=row_offset,
                         ),
-                        ext=Ext(new_w * 9525, IMG_TARGET_HEIGHT * 9525),
+                        ext=XDRPositiveSize2D(new_w * 9525, IMG_TARGET_HEIGHT * 9525),
                     )
 
                     ws.add_image(xl_img)
