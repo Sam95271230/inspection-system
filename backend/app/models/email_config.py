@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Integer, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from app.database import Base
@@ -17,4 +17,4 @@ class EmailConfig(Base):
     smtp_use_tls = Column(Boolean, default=True)
     from_name = Column(String(128), default="巡检系统")
     enabled = Column(Boolean, default=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

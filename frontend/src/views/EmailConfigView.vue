@@ -23,8 +23,7 @@ const form = reactive({
 const fetchConfig = async () => {
   loading.value = true
   try {
-    const res: any = await getEmailConfig()
-    const data = res.data || res
+    const data: any = await getEmailConfig()
     form.smtp_host = data.smtp_host || ''
     form.smtp_port = data.smtp_port || 587
     form.smtp_user = data.smtp_user || ''

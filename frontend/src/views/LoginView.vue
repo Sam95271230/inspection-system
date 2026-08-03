@@ -9,8 +9,8 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const form = ref({
-  username: 'admin',
-  password: 'admin123',
+  username: '',
+  password: '',
 })
 
 const loading = ref(false)
@@ -40,7 +40,7 @@ const handleLogin = async () => {
   <div class="login-page">
     <el-card class="login-card">
       <h2 class="title">产线电脑巡检系统</h2>
-      <el-form :model="form" label-position="top">
+      <el-form :model="form" label-position="top" @keyup.enter="handleLogin">
         <el-form-item label="用户名">
           <el-input v-model="form.username" placeholder="请输入用户名" />
         </el-form-item>

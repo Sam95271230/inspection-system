@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from uuid import UUID
 from typing import Optional, List
 from datetime import datetime
 
@@ -19,10 +20,14 @@ class InspectionCreate(BaseModel):
 
 
 class InspectionOut(InspectionCreate):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     serial_no: str
     inspector_id: str
     inspect_time: datetime
 
-    class Config:
-        from_attributes = True
+    @field_validator('id', 'inspector_id', mode='before')
+    @classmethod
+    def coerce_uuid(cls, v):
+        return str(v) if v is not None else v

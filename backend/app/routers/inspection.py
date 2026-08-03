@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func as sql_func
 from sqlalchemy.orm import joinedload
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid as uuid_module
 import os
 import io
 import zipfile
 from urllib.parse import quote
+import re
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -22,10 +23,16 @@ from app.models.inspection import Inspection, InspectionImage
 from app.models.exception import ExceptionTicket
 from app.models.user import SysUser
 from app.models.plant_dict import Plant, Line, Station
-from app.utils.response import success
+from app.utils.response import success, error
 from app.schemas.inspection import InspectionCreate
-from app.utils.minio_client import upload_file, get_minio_client
+from app.utils.minio_client import upload_file, get_minio_client, get_image_url, get_email_image_url
 from app.dependencies import get_current_user, get_authorized_plant_ids
+from app.constants import STATUS_LABEL_MAP
+from app.services.inspection_service import (
+    create_exception_for_inspection,
+    build_inspection_query,
+    parse_inspect_time,
+)
 
 router = APIRouter(prefix="/inspections", tags=["巡检记录"])
 
@@ -36,11 +43,11 @@ async def create_inspection(
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    today = datetime.now().strftime("%Y%m%d")
+    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%d")
     serial_no = f"INS-{today}-{uuid_module.uuid4().hex[:4].upper()}"
 
     # 解析巡检时间
-    inspect_time = datetime.utcnow()
+    inspect_time = datetime.now(timezone.utc).replace(tzinfo=None)
     if data.inspect_time:
         try:
             inspect_time = datetime.fromisoformat(data.inspect_time.replace('Z', '+00:00'))
@@ -75,27 +82,34 @@ async def create_inspection(
         )
         db.add(image)
 
-    # 异常自动建单
-    if data.antivirus_status == "ABNORMAL" or data.domain_status == "NOT_JOINED":
-        plant_result = await db.execute(select(Plant).where(Plant.id == data.plant_id))
-        plant = plant_result.scalar_one_or_none()
-
-        title_parts = []
-        if data.antivirus_status == "ABNORMAL":
-            title_parts.append("防毒软件异常")
-        if data.domain_status == "NOT_JOINED":
-            title_parts.append("未入域")
-        title = " - ".join(title_parts)
-
-        exception_ticket = ExceptionTicket(
-            inspection_id=inspection.id,
-            plant_id=data.plant_id,
-            title=title,
-            status="PENDING"
-        )
-        db.add(exception_ticket)
+    # 异常自动建单：通过共享服务处理
+    result = await create_exception_for_inspection(
+        db, inspection,
+        data.antivirus_status, data.domain_status,
+        data.plant_id, current_user.id, serial_no
+    )
+    exception_ticket = result[0] if result else None
+    assignee = result[1] if result else None
+    is_normal = exception_ticket is None
+    _notify_tid = exception_ticket.id if exception_ticket else None
+    _notify_assignee_id = assignee.id if assignee else None
+    _notify_assignee_has_email = assignee.email if assignee else None
+    _notify_operator_id = current_user.id  # 提交巡检的用户，用于排除检查
 
     await db.commit()
+
+    # 异步邮件通知 Member（自动分配）
+    if _notify_tid and _notify_assignee_id and _notify_assignee_has_email:
+        from app.routers.exception import _notify_exception_updated
+        async def _send_auto_assign_mail(tid, operator_id):
+            async for _db in get_db():
+                t = (await _db.execute(select(ExceptionTicket).where(ExceptionTicket.id == tid))).scalar_one_or_none()
+                o = (await _db.execute(select(SysUser).where(SysUser.id == operator_id))).scalar_one_or_none()
+                if t and o:
+                    await _notify_exception_updated(_db, t, "已自动分配", o)
+                break
+        import asyncio
+        asyncio.create_task(_send_auto_assign_mail(_notify_tid, _notify_operator_id))
 
     return success({"id": str(inspection.id), "serial_no": serial_no})
 
@@ -116,53 +130,21 @@ async def list_inspections(
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(Inspection).order_by(Inspection.created_at.desc())
+    count_stmt = select(Inspection)
 
     if not current_user.is_superadmin:
         if not authorized_plant_ids:
             return success({"list": [], "total": 0})
         stmt = stmt.where(Inspection.plant_id.in_(authorized_plant_ids))
+        count_stmt = count_stmt.where(Inspection.plant_id.in_(authorized_plant_ids))
 
-    if plant_id:
-        stmt = stmt.where(Inspection.plant_id == plant_id)
-    if line_id:
-        stmt = stmt.where(Inspection.line_id == line_id)
-    if station_id:
-        stmt = stmt.where(Inspection.station_id == station_id)
-    if antivirus_status:
-        stmt = stmt.where(Inspection.antivirus_status == antivirus_status)
-    if domain_status:
-        stmt = stmt.where(Inspection.domain_status == domain_status)
-    if start_time:
-        stmt = stmt.where(Inspection.inspect_time >= start_time)
-    if end_time:
-        stmt = stmt.where(Inspection.inspect_time <= end_time)
+    # 复用通用筛选条件
+    stmt = _build_inspection_query(stmt, plant_id, line_id, station_id, start_time, end_time, antivirus_status, domain_status)
+    count_stmt = _build_inspection_query(count_stmt, plant_id, line_id, station_id, start_time, end_time, antivirus_status, domain_status)
 
-    # 同时查询总数
-    count_stmt = select(Inspection)
-    # 对 count_stmt 应用相同的过滤条件
-    if not current_user.is_superadmin:
-        if not authorized_plant_ids:
-            count_stmt = count_stmt.where(Inspection.plant_id.in_([]))
-        else:
-            count_stmt = count_stmt.where(Inspection.plant_id.in_(authorized_plant_ids))
-    if plant_id:
-        count_stmt = count_stmt.where(Inspection.plant_id == plant_id)
-    if line_id:
-        count_stmt = count_stmt.where(Inspection.line_id == line_id)
-    if station_id:
-        count_stmt = count_stmt.where(Inspection.station_id == station_id)
-    if antivirus_status:
-        count_stmt = count_stmt.where(Inspection.antivirus_status == antivirus_status)
-    if domain_status:
-        count_stmt = count_stmt.where(Inspection.domain_status == domain_status)
-    if start_time:
-        count_stmt = count_stmt.where(Inspection.inspect_time >= start_time)
-    if end_time:
-        count_stmt = count_stmt.where(Inspection.inspect_time <= end_time)
-
-    # 先获取总数
+    # 获取总数
     total_result = await db.execute(select(
-        __import__('sqlalchemy').func.count()
+        sql_func.count()
     ).select_from(count_stmt.subquery()))
     total = total_result.scalar() or 0
 
@@ -184,9 +166,33 @@ async def list_inspections(
             image_map[str(img.inspection_id)] = []
         image_map[str(img.inspection_id)].append({
             "name": img.file_name,
-            "url": f"{os.getenv('MINIO_EXTERNAL_URL', 'http://localhost:9000')}/{os.getenv('MINIO_BUCKET', 'inspection-images')}/{img.storage_key}",
+            "url": get_image_url(img.storage_key),
             "storage_key": img.storage_key
         })
+
+    # 查询关联的厂区/线别/站别名称
+    plant_ids = list({i.plant_id for i in inspections})
+    line_ids = list({i.line_id for i in inspections})
+    station_ids = list({i.station_id for i in inspections})
+
+    plant_name_map = {}
+    line_name_map = {}
+    station_name_map = {}
+
+    if plant_ids:
+        p_result = await db.execute(select(Plant).where(Plant.id.in_(plant_ids)))
+        for p in p_result.scalars().all():
+            plant_name_map[str(p.id)] = p.name
+
+    if line_ids:
+        l_result = await db.execute(select(Line).where(Line.id.in_(line_ids)))
+        for l in l_result.scalars().all():
+            line_name_map[str(l.id)] = l.name
+
+    if station_ids:
+        s_result = await db.execute(select(Station).where(Station.id.in_(station_ids)))
+        for s in s_result.scalars().all():
+            station_name_map[str(s.id)] = s.name
 
     return success({
         "list": [
@@ -194,14 +200,19 @@ async def list_inspections(
                 "id": str(i.id),
                 "serial_no": i.serial_no,
                 "plant_id": str(i.plant_id),
+                "plant_name": plant_name_map.get(str(i.plant_id), ""),
                 "line_id": str(i.line_id),
+                "line_name": line_name_map.get(str(i.line_id), ""),
                 "station_id": str(i.station_id),
+                "station_name": station_name_map.get(str(i.station_id), ""),
                 "ip_address": i.ip_address,
+                "machine_name": i.machine_name,
                 "antivirus_status": i.antivirus_status,
                 "domain_status": i.domain_status,
                 "remark": i.remark,
                 "status": i.status,
                 "inspect_time": i.inspect_time.isoformat() if i.inspect_time else None,
+                "inspector_name": i.inspector_name,
                 "images": image_map.get(str(i.id), [])
             }
             for i in inspections
@@ -214,9 +225,9 @@ async def list_inspections(
 async def upload_inspection_image(file: UploadFile = File(...)):
     content = await file.read()
     object_name = f"inspection/{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}"
-    url = upload_file(object_name, content, file.content_type or "image/jpeg")
+    upload_file(object_name, content, file.content_type or "image/jpeg")
     return success({
-        "url": url,
+        "url": get_image_url(object_name),
         "storage_key": object_name,
         "name": file.filename
     })
@@ -241,7 +252,7 @@ async def batch_import_inspections(
     图片命名规则：行号_序号.jpg，例如 2_1.jpg 表示第2行第1张图
     """
     if not file.filename.endswith('.zip'):
-        return success(code=400, message="请上传 ZIP 压缩包")
+        return error(message="请上传 ZIP 压缩包")
 
     content = await file.read()
     zf = zipfile.ZipFile(io.BytesIO(content))
@@ -255,7 +266,7 @@ async def batch_import_inspections(
             break
 
     if not excel_name:
-        return success(code=400, message="ZIP 包中未找到 .xlsx 文件")
+        return error(message="ZIP 包中未找到 .xlsx 文件")
 
     # 读取 Excel
     excel_data = zf.read(excel_name)
@@ -284,7 +295,7 @@ async def batch_import_inspections(
             continue
 
     stats = {"created": 0, "errors": 0, "images": 0}
-    today = datetime.now().strftime("%Y%m%d")
+    today = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%d")
     minio_client = get_minio_client()
     bucket = os.getenv("MINIO_BUCKET", "inspection-images")
 
@@ -293,7 +304,7 @@ async def batch_import_inspections(
     def extract_code(val):
         raw = str(val).strip() if val else ""
         # 去除括号及内容：如 "NORMAL(正常)" → "NORMAL"
-        raw = __import__('re').sub(r'\([^)]*\)', '', raw).strip()
+        raw = re.sub(r'\([^)]*\)', '', raw).strip()
         # 取空格或 "-" 分隔的第一部分（支持纯 code 和 "P1 - A厂区" 格式）
         parts = raw.split(None, 1)
         return parts[0] if parts else raw
@@ -372,7 +383,7 @@ async def batch_import_inspections(
             serial_no = f"INS-{today}-{uuid_module.uuid4().hex[:4].upper()}"
 
             # 解析巡检时间
-            inspect_time = datetime.utcnow()
+            inspect_time = datetime.now(timezone.utc).replace(tzinfo=None)
             if inspect_time_str:
                 try:
                     inspect_time = datetime.fromisoformat(inspect_time_str.replace('Z', '+00:00'))
@@ -429,21 +440,11 @@ async def batch_import_inspections(
                         pass  # 单张图片失败不中断
 
             # 异常自动建单
-            if antivirus_status == "ABNORMAL" or domain_status == "NOT_JOINED":
-                title_parts = []
-                if antivirus_status == "ABNORMAL":
-                    title_parts.append("防毒软件异常")
-                if domain_status == "NOT_JOINED":
-                    title_parts.append("未入域")
-                title = " - ".join(title_parts)
-
-                exception_ticket = ExceptionTicket(
-                    inspection_id=inspection.id,
-                    plant_id=plant_id,
-                    title=title,
-                    status="PENDING"
-                )
-                db.add(exception_ticket)
+            await create_exception_for_inspection(
+                db, inspection,
+                antivirus_status, domain_status,
+                plant_id, current_user.id, serial_no
+            )
 
             stats["created"] += 1
         except Exception:
@@ -455,17 +456,6 @@ async def batch_import_inspections(
         "message": f"导入完成：成功 {stats['created']} 条，失败 {stats['errors']} 条，图片 {stats['images']} 张",
         "stats": stats
     })
-
-
-# 状态中文映射
-STATUS_LABEL_MAP = {
-    "NORMAL": "正常",
-    "ABNORMAL": "异常",
-    "NOT_INSTALLED": "未安装",
-    "JOINED": "已入域",
-    "NOT_JOINED": "未入域",
-    "NOT_APPLICABLE": "不适用",
-}
 
 
 def _build_inspection_query(
@@ -526,7 +516,7 @@ async def export_inspections(
         else:
             stmt = stmt.where(Inspection.plant_id.in_(authorized_plant_ids))
 
-    stmt = _build_inspection_query(
+    stmt = build_inspection_query(
         stmt,
         plant_id=plant_id,
         line_id=line_id,
@@ -589,7 +579,7 @@ async def export_inspections(
     )
 
     # 表头
-    headers = ["巡检单号", "厂区", "线别", "站别", "IP地址", "防毒软件状态", "入域状态", "备注", "巡检时间", "巡检人", "巡检证据"]
+    headers = ["巡检单号", "厂区", "线别", "站别", "IP地址", "机器名", "防毒软件状态", "入域状态", "备注", "巡检时间", "巡检人", "巡检证据"]
     for col_idx, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.font = header_font
@@ -615,11 +605,12 @@ async def export_inspections(
             line_name_map.get(str(inspection.line_id), ""),
             station_name_map.get(str(inspection.station_id), ""),
             inspection.ip_address,
+            inspection.machine_name or "",
             STATUS_LABEL_MAP.get(inspection.antivirus_status, inspection.antivirus_status),
             STATUS_LABEL_MAP.get(inspection.domain_status, inspection.domain_status),
             inspection.remark or "",
             inspection.inspect_time.strftime("%Y-%m-%d %H:%M:%S") if inspection.inspect_time else "",
-            inspector_name_map.get(str(inspection.inspector_id), ""),
+            inspection.inspector_name or inspector_name_map.get(str(inspection.inspector_id), ""),
         ]
         for col_idx, value in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
@@ -630,7 +621,7 @@ async def export_inspections(
             else:
                 cell.alignment = cell_alignment
 
-        evidence_cell = ws.cell(row=row_idx, column=11)
+        evidence_cell = ws.cell(row=row_idx, column=12)
         evidence_cell.border = thin_border
         evidence_cell.alignment = Alignment(horizontal="center", vertical="top")
 
@@ -671,7 +662,7 @@ async def export_inspections(
 
                     xl_img.anchor = OneCellAnchor(
                         _from=AnchorMarker(
-                            col=10,
+                            col=11,
                             colOff=col_offset,
                             row=row_idx - 1,
                             rowOff=row_offset,
@@ -686,7 +677,7 @@ async def export_inspections(
             evidence_cell.value = "无"
             ws.row_dimensions[row_idx].height = 30
 
-    column_widths = [20, 22, 22, 22, 16, 16, 12, 30, 22, 14, IMG_EMBED_WIDTH]
+    column_widths = [20, 22, 22, 22, 16, 16, 16, 16, 12, 30, 22, 14, IMG_EMBED_WIDTH]
     for col_idx, width in enumerate(column_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width
 
@@ -696,7 +687,7 @@ async def export_inspections(
     wb.save(output)
     output.seek(0)
 
-    filename = f"巡检记录_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    filename = f"巡检记录_{datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y%m%d')}.xlsx"
     encoded_filename = quote(filename, safe='')
 
     return StreamingResponse(

@@ -1,30 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from datetime import datetime, timedelta
 from typing import Optional, List
 import os
+import json
 
 from app.database import get_db
 from app.models.exception import ExceptionTicket, ExceptionHistory
 from app.models.inspection import Inspection, InspectionImage
-from app.models.user import SysUser
+from app.models.user import SysUser, user_plant
 from app.models.plant_dict import Plant
 from app.utils.response import success
 from app.dependencies import get_current_user
-from app.utils.minio_client import get_minio_client
+from app.utils.minio_client import get_minio_client, upload_file, get_image_url, get_email_image_url
 from app.routers.email_config import get_active_email_config, _send_email as send_mail
+from app.constants import ExceptionStatus
+from app.utils.email_templates import build_exception_email_body
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/exceptions", tags=["异常签核"])
-
-
-class ExceptionStatus:
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    PENDING_SIGNOFF = "PENDING_SIGNOFF"
-    CLOSED = "CLOSED"
-    REJECTED = "REJECTED"
 
 
 class AssignRequest(BaseModel):
@@ -35,6 +30,7 @@ class AssignRequest(BaseModel):
 class ProcessRequest(BaseModel):
     remark: Optional[str] = None
     attachment_urls: Optional[List[str]] = None
+    images: Optional[List[dict]] = None  # 处理后图片：[{storage_key, name, url}]
 
 
 class ApproveRequest(BaseModel):
@@ -47,6 +43,7 @@ class RejectRequest(BaseModel):
 
 class ReprocessRequest(BaseModel):
     remark: Optional[str] = None
+    images: Optional[List[dict]] = None
 
 
 async def add_history(db, ticket_id, from_status, to_status, operator_id, action, remark, attachment_urls):
@@ -72,17 +69,12 @@ async def _get_inspection_images(db, inspection_id) -> list:
     if not images:
         return []
 
-    minio_client = get_minio_client()
-    bucket = os.getenv("MINIO_BUCKET", "inspection-images")
-    external_url = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
-
     image_urls = []
     for img in images:
-        url = f"{external_url}/{bucket}/{img.storage_key}"
         image_urls.append({
             "id": str(img.id),
             "file_name": img.file_name,
-            "url": url,
+            "url": get_image_url(img.storage_key),
             "sort_order": img.sort_order,
         })
 
@@ -166,52 +158,92 @@ async def _build_email_body(db, ticket: ExceptionTicket, action_name: str, opera
     return body
 
 
-async def _notify_exception_updated(db, ticket, action_name, operator):
-    """根据状态变更发送邮件通知相关用户"""
-    # 排除当前操作者之外，根据需要通知相关人
-    notify_users = []
-
-    if ticket.status == ExceptionStatus.PROCESSING and ticket.current_assignee_id:
-        result = await db.execute(
-            select(SysUser).where(SysUser.id == ticket.current_assignee_id)
-        )
-        assignee = result.scalar_one_or_none()
-        if assignee and assignee.email and str(assignee.id) != str(operator.id):
-            notify_users.append(assignee)
-    elif ticket.status == ExceptionStatus.PENDING_SIGNOFF:
-        result = await db.execute(
-            select(SysUser).where(SysUser.is_superadmin.is_(True), SysUser.email.isnot(None))
-        )
-        admins = result.scalars().all()
-        for admin in admins:
-            if str(admin.id) != str(operator.id):
-                notify_users.append(admin)
-    elif ticket.status in (ExceptionStatus.CLOSED, ExceptionStatus.REJECTED):
-        result = await db.execute(
-            select(ExceptionHistory)
-            .where(ExceptionHistory.ticket_id == ticket.id)
-            .order_by(ExceptionHistory.created_at)
-            .limit(1)
-        )
-        first_history = result.scalar_one_or_none()
-        if first_history:
-            submitter_result = await db.execute(
-                select(SysUser).where(SysUser.id == first_history.operator_id, SysUser.email.isnot(None))
+async def _notify_exception_updated(ticket_id: str, action_name: str, operator_id: str):
+    """根据状态变更发送邮件通知相关用户（创建独立 DB 会话）"""
+    async for db in get_db():
+        try:
+            # 重新加载 ticket
+            ticket_result = await db.execute(
+                select(ExceptionTicket).where(ExceptionTicket.id == ticket_id)
             )
-            submitter = submitter_result.scalar_one_or_none()
-            if submitter and str(submitter.id) != str(operator.id):
-                notify_users.append(submitter)
+            ticket = ticket_result.scalar_one_or_none()
+            if not ticket:
+                return
 
-    # 构建邮件正文（含URL和图片）
-    for user in notify_users:
-        insp_result = await db.execute(
-            select(Inspection).where(Inspection.id == ticket.inspection_id)
-        )
-        insp = insp_result.scalar_one_or_none()
-        serial_no = insp.serial_no if insp else "N/A"
-        subject = f"[巡检系统] 异常单 {serial_no} - {action_name}"
-        body = await _build_email_body(db, ticket, action_name, operator)
-        await _send_mail_notification(db, user.email, subject, body)
+            operator_result = await db.execute(
+                select(SysUser).where(SysUser.id == operator_id)
+            )
+            operator = operator_result.scalar_one_or_none()
+            if not operator:
+                return
+
+            notify_users = []
+
+            if ticket.status == ExceptionStatus.PROCESSING and ticket.current_assignee_id:
+                result = await db.execute(
+                    select(SysUser).where(SysUser.id == ticket.current_assignee_id)
+                )
+                assignee = result.scalar_one_or_none()
+                if assignee and assignee.email and str(assignee.id) != str(operator.id):
+                    notify_users.append(assignee)
+            elif ticket.status == ExceptionStatus.PENDING_SIGNOFF:
+                result = await db.execute(
+                    select(SysUser)
+                    .join(user_plant, (user_plant.c.user_id == SysUser.id) & (user_plant.c.plant_id == ticket.plant_id) & (user_plant.c.role == "LEADER"))
+                    .where(SysUser.is_active.is_(True), SysUser.email.isnot(None))
+                )
+                leaders = result.scalars().all()
+                for leader in leaders:
+                    if str(leader.id) != str(operator.id):
+                        notify_users.append(leader)
+                admin_result = await db.execute(
+                    select(SysUser).where(SysUser.is_superadmin.is_(True), SysUser.email.isnot(None))
+                )
+                admins = admin_result.scalars().all()
+                for admin in admins:
+                    if str(admin.id) != str(operator.id) and admin not in leaders:
+                        notify_users.append(admin)
+            elif ticket.status in (ExceptionStatus.CLOSED, ExceptionStatus.REJECTED):
+                result = await db.execute(
+                    select(ExceptionHistory)
+                    .where(ExceptionHistory.ticket_id == ticket.id)
+                    .order_by(ExceptionHistory.created_at)
+                    .limit(1)
+                )
+                first_history = result.scalar_one_or_none()
+                if first_history:
+                    submitter_result = await db.execute(
+                        select(SysUser).where(SysUser.id == first_history.operator_id, SysUser.email.isnot(None))
+                    )
+                    submitter = submitter_result.scalar_one_or_none()
+                    if submitter and str(submitter.id) != str(operator.id):
+                        notify_users.append(submitter)
+
+            for user in notify_users:
+                insp_result = await db.execute(
+                    select(Inspection).where(Inspection.id == ticket.inspection_id)
+                )
+                insp = insp_result.scalar_one_or_none()
+                serial_no = insp.serial_no if insp else "N/A"
+                subject = f"[巡检系统] 异常单 {serial_no} - {action_name}"
+                body = await _build_email_body(db, ticket, action_name, operator)
+                await _send_mail_notification(db, user.email, subject, body)
+        finally:
+            break  # get_db() only yields once
+
+
+@router.post("/upload-image")
+async def upload_exception_image(file: UploadFile = File(...)):
+    """上传异常处理图片到 MinIO"""
+    content = await file.read()
+    object_name = f"exception/{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}"
+    upload_file(object_name, content, file.content_type or "image/jpeg")
+    return success({
+        "url": get_image_url(object_name),
+        "storage_key": object_name,
+        "name": file.filename,
+        "mime_type": file.content_type or "image/jpeg"
+    })
 
 
 @router.get("")
@@ -223,6 +255,7 @@ async def list_exceptions(
     current_user: SysUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    authorized_plants = []
     if not current_user.is_superadmin:
         from app.dependencies import get_authorized_plant_ids
         authorized_plants = await get_authorized_plant_ids(current_user, db)
@@ -243,8 +276,17 @@ async def list_exceptions(
     result = await db.execute(stmt.offset(offset).limit(page_size))
     tickets = result.scalars().all()
 
-    count_result = await db.execute(select(ExceptionTicket))
-    total = len(count_result.scalars().all())
+    # 构建总数查询（应用相同过滤条件）
+    from sqlalchemy import func as sql_func
+    count_stmt = select(sql_func.count()).select_from(ExceptionTicket)
+    if not current_user.is_superadmin:
+        count_stmt = count_stmt.where(ExceptionTicket.plant_id.in_(authorized_plants))
+    if status:
+        count_stmt = count_stmt.where(ExceptionTicket.status == status)
+    if plant_id:
+        count_stmt = count_stmt.where(ExceptionTicket.plant_id == plant_id)
+    total_result = await db.execute(count_stmt)
+    total = total_result.scalar() or 0
 
     inspection_ids = [t.inspection_id for t in tickets]
     inspections = {}
@@ -385,6 +427,10 @@ async def assign_exception(
     if not req.assignee_id:
         raise HTTPException(status_code=400, detail="请选择处理人")
 
+    # 权限检查：只有超级管理员或厂区 Leader 可以手动分配
+    if not await _check_is_plant_leader(db, current_user, ticket.plant_id):
+        raise HTTPException(status_code=403, detail="只有该厂区的 Leader 或超级管理员可以分配工单")
+
     from_status = ticket.status
     ticket.status = ExceptionStatus.PROCESSING
     ticket.current_assignee_id = req.assignee_id
@@ -397,7 +443,7 @@ async def assign_exception(
     await db.refresh(ticket)
 
     # 邮件通知处理人
-    background_tasks.add_task(_notify_exception_updated, db, ticket, "已分配处理人", current_user)
+    background_tasks.add_task(_notify_exception_updated, str(ticket.id), "已分配处理人", str(current_user.id))
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -424,17 +470,50 @@ async def process_exception(
     from_status = ticket.status
     ticket.status = ExceptionStatus.PENDING_SIGNOFF
 
+    # 合并 attachment_urls 和 images 到历史记录
+    all_attachments = list(req.attachment_urls or [])
+    for img in (req.images or []):
+        all_attachments.append(json.dumps(img, ensure_ascii=False))
+
     await add_history(
         db, ticket.id, from_status, ticket.status,
-        current_user.id, "PROCESS", req.remark, req.attachment_urls
+        current_user.id, "PROCESS", req.remark, all_attachments
     )
+
+    # 自动分配给该厂区的 LEADER 签核
+    leader_result = await db.execute(
+        select(SysUser)
+        .join(user_plant, (user_plant.c.user_id == SysUser.id) & (user_plant.c.plant_id == ticket.plant_id) & (user_plant.c.role == "LEADER"))
+        .where(SysUser.is_active.is_(True))
+        .limit(1)
+    )
+    leader = leader_result.scalar_one_or_none()
+    if leader:
+        ticket.current_assignee_id = leader.id
+        await add_history(
+            db, ticket.id, ticket.status, ticket.status,
+            current_user.id, "AUTO_ASSIGN", f"自动转签核给厂区Leader: {leader.real_name or leader.username}", []
+        )
+
     await db.commit()
     await db.refresh(ticket)
 
-    # 邮件通知管理员签核
-    background_tasks.add_task(_notify_exception_updated, db, ticket, "待签核", current_user)
+    # 邮件通知签核人（LEADER）
+    background_tasks.add_task(_notify_exception_updated, str(ticket.id), "待签核", str(current_user.id))
 
     return success({"id": str(ticket.id), "status": ticket.status})
+
+
+async def _check_is_plant_leader(db, user: SysUser, plant_id) -> bool:
+    """检查用户是否为指定厂区的 Leader 或超级管理员"""
+    if user.is_superadmin:
+        return True
+    result = await db.execute(
+        select(user_plant.c.role).where(
+            (user_plant.c.user_id == user.id) & (user_plant.c.plant_id == plant_id) & (user_plant.c.role == "LEADER")
+        )
+    )
+    return result.scalar_one_or_none() is not None
 
 
 @router.post("/{ticket_id}/approve")
@@ -453,6 +532,10 @@ async def approve_exception(
     if ticket.status != ExceptionStatus.PENDING_SIGNOFF:
         raise HTTPException(status_code=400, detail="当前状态不允许签核")
 
+    # 权限检查：只有厂区 Leader 或超级管理员可以签核
+    if not await _check_is_plant_leader(db, current_user, ticket.plant_id):
+        raise HTTPException(status_code=403, detail="只有该厂区的 Leader 或超级管理员可以签核")
+
     from_status = ticket.status
     ticket.status = ExceptionStatus.CLOSED
 
@@ -464,7 +547,7 @@ async def approve_exception(
     await db.refresh(ticket)
 
     # 邮件通知提交人已签核通过
-    background_tasks.add_task(_notify_exception_updated, db, ticket, "签核通过", current_user)
+    background_tasks.add_task(_notify_exception_updated, str(ticket.id), "签核通过", str(current_user.id))
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -485,6 +568,10 @@ async def reject_exception(
     if ticket.status != ExceptionStatus.PENDING_SIGNOFF:
         raise HTTPException(status_code=400, detail="当前状态不允许驳回")
 
+    # 权限检查：只有厂区 Leader 或超级管理员可以驳回
+    if not await _check_is_plant_leader(db, current_user, ticket.plant_id):
+        raise HTTPException(status_code=403, detail="只有该厂区的 Leader 或超级管理员可以驳回")
+
     from_status = ticket.status
     ticket.status = ExceptionStatus.REJECTED
 
@@ -496,7 +583,7 @@ async def reject_exception(
     await db.refresh(ticket)
 
     # 邮件通知提交人已驳回
-    background_tasks.add_task(_notify_exception_updated, db, ticket, "签核驳回", current_user)
+    background_tasks.add_task(_notify_exception_updated, str(ticket.id), "签核驳回", str(current_user.id))
 
     return success({"id": str(ticket.id), "status": ticket.status})
 
@@ -520,14 +607,19 @@ async def reprocess_exception(
     from_status = ticket.status
     ticket.status = ExceptionStatus.PROCESSING
 
+    # 合并图片到附件
+    all_attachments = []
+    for img in (req.images or []):
+        all_attachments.append(json.dumps(img, ensure_ascii=False))
+
     await add_history(
         db, ticket.id, from_status, ticket.status,
-        current_user.id, "REPROCESS", req.remark, []
+        current_user.id, "REPROCESS", req.remark, all_attachments
     )
     await db.commit()
     await db.refresh(ticket)
 
     # 邮件通知处理人需重新处理
-    background_tasks.add_task(_notify_exception_updated, db, ticket, "重新处理", current_user)
+    background_tasks.add_task(_notify_exception_updated, str(ticket.id), "重新处理", str(current_user.id))
 
     return success({"id": str(ticket.id), "status": ticket.status})

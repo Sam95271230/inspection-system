@@ -12,8 +12,15 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://inspection_user:inspection_pass@postgres:5432/inspection_db"
 )
 
-# 创建异步引擎
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+# 创建异步引擎（含连接池优化）
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+    pool_recycle=int(os.getenv("DB_POOL_RECYCLE", "3600")),
+    pool_pre_ping=True,
+)
 
 # 创建异步 Session 工厂
 AsyncSessionLocal = async_sessionmaker(

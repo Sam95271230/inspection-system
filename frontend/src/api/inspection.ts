@@ -25,6 +25,17 @@ export const batchImportInspections = (file: File) => {
   return request.post('/inspections/batch-import', formData)
 }
 
+// 厂区字典增删改查
+export const createPlant = (data: any) => request.post('/dict/plant', data)
+export const updatePlant = (id: string, data: any) => request.put(`/dict/plant/${id}`, data)
+export const deletePlant = (id: string) => request.delete(`/dict/plant/${id}`)
+export const createLine = (data: any) => request.post('/dict/line', data)
+export const updateLine = (id: string, data: any) => request.put(`/dict/line/${id}`, data)
+export const deleteLine = (id: string) => request.delete(`/dict/line/${id}`)
+export const createStation = (data: any) => request.post('/dict/station', data)
+export const updateStation = (id: string, data: any) => request.put(`/dict/station/${id}`, data)
+export const deleteStation = (id: string) => request.delete(`/dict/station/${id}`)
+
 export const exportInspections = async (params: any) => {
   const response = await axios.get('/api/v1/inspections/export', {
     params,

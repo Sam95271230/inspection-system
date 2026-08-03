@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   getExceptionList,
@@ -8,20 +8,19 @@ import {
   processException,
   approveException,
   rejectException,
-  reprocessException
+  reprocessException,
+  uploadExceptionImage
 } from '@/api/exception'
 import { getUserList } from '@/api/user'
+import { useAuthStore } from '@/stores/auth'
 import { Hide } from '@element-plus/icons-vue'
+import { EXCEPTION_STATUS_MAP } from '@/constants'
 
+// 状态映射（从常量导入）
+const statusMap = EXCEPTION_STATUS_MAP
 
-// 状态映射
-const statusMap: Record<string, { label: string; type: string }> = {
-  PENDING: { label: '待分配', type: 'info' },
-  PROCESSING: { label: '处理中', type: 'warning' },
-  PENDING_SIGNOFF: { label: '待签核', type: 'primary' },
-  CLOSED: { label: '已结案', type: 'success' },
-  REJECTED: { label: '已驳回', type: 'danger' }
-}
+const authStore = useAuthStore()
+const currentUser = computed(() => authStore.user)
 
 const loading = ref(false)
 const tableData = ref<any[]>([])
@@ -37,6 +36,8 @@ const actionForm = reactive({
   remark: '',
   assignee_id: ''
 })
+const actionImages = ref<any[]>([])
+const actionUploading = ref(false)
 
 const detailVisible = ref(false)
 const currentDetail = ref<any>(null)
@@ -68,14 +69,42 @@ const openAction = (row: any, action: string) => {
   actionType.value = action
   actionForm.remark = ''
   actionForm.assignee_id = ''
+  actionImages.value = []
   actionDialogVisible.value = true
+}
+
+const handleActionImageUpload = async (file: any) => {
+  const rawFile = file.raw as File
+  if (!rawFile.type.startsWith('image/')) {
+    ElMessage.error('只能上传图片文件')
+    return false
+  }
+  if (rawFile.size > 5 * 1024 * 1024) {
+    ElMessage.error('单张图片不能超过 5MB')
+    return false
+  }
+  actionUploading.value = true
+  try {
+    const res: any = await uploadExceptionImage(rawFile)
+    actionImages.value.push(res)
+    ElMessage.success('上传成功')
+  } catch {
+    ElMessage.error('上传失败')
+  } finally {
+    actionUploading.value = false
+  }
+  return false
+}
+
+const removeActionImage = (index: number) => {
+  actionImages.value.splice(index, 1)
 }
 
 const submitAction = async () => {
   if (!currentTicket.value) return
 
   const { id } = currentTicket.value
-  const data = {
+  const data: any = {
     remark: actionForm.remark,
     assignee_id: actionForm.assignee_id
   }
@@ -91,6 +120,7 @@ const submitAction = async () => {
         await assignException(id, data)
         break
       case 'PROCESS':
+        data.images = actionImages.value
         await processException(id, data)
         break
       case 'APPROVE':
@@ -100,6 +130,7 @@ const submitAction = async () => {
         await rejectException(id, data)
         break
       case 'REPROCESS':
+        data.images = actionImages.value
         await reprocessException(id, data)
         break
     }
@@ -140,18 +171,31 @@ const openDetail = async (row: any) => {
 const getActions = (row: any) => {
   const actions: any[] = []
   const status = row.status
+  const userId = currentUser.value?.id
+  const isSuperAdmin = currentUser.value?.is_superadmin
 
+  // 按钮权限控制：根据用户角色和工单状态决定可见的操作
   if (status === 'PENDING') {
-    actions.push({ label: '分配', type: 'primary', action: 'ASSIGN' })
+    // 超级管理员或厂区 Leader 可分配（后端做最终权限校验）
+    if (isSuperAdmin || row.current_assignee_id !== userId) {
+      actions.push({ label: '分配', type: 'primary', action: 'ASSIGN' })
+    }
   }
   if (status === 'PROCESSING') {
-    actions.push({ label: '提交处理结果', type: 'primary', action: 'PROCESS' })
+    // 只有当前处理人可以提交处理结果
+    if (row.current_assignee_id === userId) {
+      actions.push({ label: '提交处理结果', type: 'primary', action: 'PROCESS' })
+    }
   }
   if (status === 'PENDING_SIGNOFF') {
-    actions.push({ label: '签核通过', type: 'success', action: 'APPROVE' })
-    actions.push({ label: '驳回', type: 'danger', action: 'REJECT' })
+    // 超级管理员或该厂区Leader可签核
+    if (isSuperAdmin || row.current_assignee_id === userId) {
+      actions.push({ label: '签核通过', type: 'success', action: 'APPROVE' })
+      actions.push({ label: '驳回', type: 'danger', action: 'REJECT' })
+    }
   }
-  if (status === 'REJECTED') {
+  if (status === 'REJECTED' && row.current_assignee_id === userId) {
+    // 驳回后的工单，原处理人可重新提交
     actions.push({ label: '重新处理', type: 'warning', action: 'REPROCESS' })
   }
 
@@ -164,6 +208,16 @@ const imagePreviewUrl = ref('')
 const openImagePreview = (url: string) => {
   imagePreviewUrl.value = url
   imagePreviewVisible.value = true
+}
+
+const getImageUrl = (item: string): string | null => {
+  try {
+    const obj = JSON.parse(item)
+    return obj.url || null
+  } catch {
+    if (item.startsWith('http')) return item
+    return null
+  }
 }
 
 onMounted(() => {
@@ -217,6 +271,8 @@ onMounted(() => {
           :total="total"
           :page-sizes="[10, 20, 50]"
           layout="total, sizes, prev, pager, next, jumper"
+          @size-change="fetchList"
+          @current-change="fetchList"
         />
       </div>
     </el-card>
@@ -232,6 +288,25 @@ onMounted(() => {
           </el-form-item>
           <el-form-item label="处理说明">
             <el-input v-model="actionForm.remark" type="textarea" :rows="4" placeholder="请输入处理说明" />
+          </el-form-item>
+          <el-form-item label="处理图片" v-if="actionType === 'PROCESS' || actionType === 'REPROCESS'">
+            <div>
+              <el-upload
+                :show-file-list="false"
+                :auto-upload="false"
+                :on-change="handleActionImageUpload"
+                accept="image/*"
+              >
+                <el-button type="primary" :loading="actionUploading" size="small">上传图片</el-button>
+              </el-upload>
+              <div class="action-images" v-if="actionImages.length > 0">
+                <div v-for="(img, idx) in actionImages" :key="idx" class="action-image-item">
+                  <el-image :src="img.url" fit="cover" style="width:80px;height:80px;border-radius:4px" />
+                  <span class="action-image-name">{{ img.name }}</span>
+                  <span class="action-image-remove" @click="removeActionImage(idx)">×</span>
+                </div>
+              </div>
+            </div>
           </el-form-item>
         </el-form>
       </div>
@@ -296,6 +371,22 @@ onMounted(() => {
                 <span class="action">{{ item.action }}</span>
               </div>
               <div v-if="item.remark" class="timeline-remark">备注：{{ item.remark }}</div>
+              <div v-if="item.attachment_urls && item.attachment_urls.length > 0" class="timeline-images">
+                <div
+                  v-for="(att, attIdx) in item.attachment_urls"
+                  :key="attIdx"
+                  class="timeline-image-item"
+                >
+                  <el-image
+                    v-if="getImageUrl(att)"
+                    :src="getImageUrl(att)"
+                    fit="cover"
+                    style="width:100px;height:80px;border-radius:4px;cursor:pointer"
+                    :preview-src-list="item.attachment_urls.map((a: string) => getImageUrl(a)).filter(Boolean)"
+                  />
+                  <el-tag v-else size="small" style="margin:2px">{{ att }}</el-tag>
+                </div>
+              </div>
             </div>
           </el-timeline-item>
         </el-timeline>
@@ -394,5 +485,49 @@ onMounted(() => {
 .timeline-remark {
   color: #606266;
   font-size: 13px;
+}
+.timeline-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.timeline-image-item {
+  display: inline-block;
+}
+.action-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.action-image-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.action-image-name {
+  font-size: 11px;
+  color: #909399;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.action-image-remove {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 12px;
+  cursor: pointer;
 }
 </style>

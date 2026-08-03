@@ -30,6 +30,7 @@ const form = reactive({
   role_ids: [] as string[],
   plant_ids: [] as string[]
 })
+const plantRolesMap = reactive<Record<string, string>>({})
 
 const fetchUsers = async () => {
   loading.value = true
@@ -69,6 +70,12 @@ const openEdit = (row: any) => {
   form.is_superadmin = row.is_superadmin
   form.role_ids = row.role_ids || []
   form.plant_ids = row.plant_ids || []
+  for (const pid of Object.keys(plantRolesMap)) delete plantRolesMap[pid]
+  if (row.plant_roles?.length) {
+    for (const pr of row.plant_roles) plantRolesMap[pr.plant_id] = pr.role
+  } else if (row.plant_ids?.length) {
+    for (const pid of row.plant_ids) plantRolesMap[pid] = 'MEMBER'
+  }
   dialogVisible.value = true
 }
 
@@ -83,6 +90,7 @@ const resetForm = () => {
   form.is_superadmin = false
   form.role_ids = []
   form.plant_ids = []
+  for (const pid of Object.keys(plantRolesMap)) delete plantRolesMap[pid]
 }
 
 const handleSave = async () => {
@@ -95,6 +103,10 @@ const handleSave = async () => {
     return
   }
 
+  const plantRoles = (form.plant_ids || []).map(pid => ({
+    plant_id: pid,
+    role: plantRolesMap[pid] || 'MEMBER'
+  }))
   const data: any = {
     username: form.username,
     real_name: form.real_name,
@@ -103,7 +115,8 @@ const handleSave = async () => {
     is_active: form.is_active,
     is_superadmin: form.is_superadmin,
     role_ids: form.role_ids,
-    plant_ids: form.is_superadmin ? [] : form.plant_ids
+    plant_ids: form.is_superadmin ? [] : form.plant_ids,
+    plant_roles: form.is_superadmin ? [] : plantRoles
   }
 
   try {
@@ -194,14 +207,28 @@ onMounted(() => {
             <span v-else class="no-permission">无角色</span>
           </template>
         </el-table-column>
-        <el-table-column label="授权厂区" min-width="200">
+        <el-table-column label="授权厂区（角色）" min-width="280">
           <template #default="{ row }">
             <el-tag v-if="row.is_superadmin" type="success">全部厂区</el-tag>
             <template v-else>
-              <el-tag v-for="pid in row.plant_ids" :key="pid" type="info" class="plant-tag">
-                {{ plants.find(p => p.value === pid)?.label || pid }}
-              </el-tag>
-              <span v-if="!row.plant_ids?.length" class="no-permission">无授权厂区</span>
+              <template v-if="row.plant_roles?.length">
+                <el-tag
+                  v-for="pr in row.plant_roles"
+                  :key="pr.plant_id"
+                  :type="pr.role === 'LEADER' ? 'warning' : 'info'"
+                  class="plant-tag"
+                >
+                  {{ plants.find(p => p.value === pr.plant_id)?.label || pr.plant_id }}
+                  <span style="margin-left:4px;font-size:11px">[{{ pr.role === 'LEADER' ? 'Leader' : 'Member' }}]</span>
+                </el-tag>
+              </template>
+              <!-- 向后兼容旧数据 plant_ids -->
+              <template v-else-if="row.plant_ids?.length">
+                <el-tag v-for="pid in row.plant_ids" :key="pid" type="info" class="plant-tag">
+                  {{ plants.find(p => p.value === pid)?.label || pid }}
+                </el-tag>
+              </template>
+              <span v-else class="no-permission">无授权厂区</span>
             </template>
           </template>
         </el-table-column>
@@ -249,12 +276,34 @@ onMounted(() => {
         <el-form-item label="超级管理员">
           <el-switch v-model="form.is_superadmin" active-text="是" inactive-text="否" />
         </el-form-item>
-        <el-form-item label="授权厂区" v-if="!form.is_superadmin">
-          <el-checkbox-group v-model="form.plant_ids">
-            <el-checkbox v-for="plant in plants" :key="plant.value" :label="plant.value">
+        <el-form-item label="授权厂区（角色）" v-if="!form.is_superadmin">
+          <div v-for="plant in plants" :key="plant.value" style="margin-bottom:8px;">
+            <el-checkbox
+              :model-value="form.plant_ids.includes(plant.value)"
+              @change="(val: boolean) => {
+                if (val) {
+                  form.plant_ids.push(plant.value)
+                  if (!plantRolesMap[plant.value]) plantRolesMap[plant.value] = 'MEMBER'
+                } else {
+                  const idx = form.plant_ids.indexOf(plant.value)
+                  if (idx > -1) form.plant_ids.splice(idx, 1)
+                  delete plantRolesMap[plant.value]
+                }
+              }"
+            >
               {{ plant.label }}
             </el-checkbox>
-          </el-checkbox-group>
+            <el-radio-group
+              v-if="form.plant_ids.includes(plant.value)"
+              v-model="plantRolesMap[plant.value]"
+              style="margin-left:24px;"
+              size="small"
+            >
+              <el-radio value="MEMBER">Member</el-radio>
+              <el-radio value="LEADER">Leader</el-radio>
+            </el-radio-group>
+          </div>
+          <span v-if="plants.length === 0" style="color:#909399;font-size:12px">暂无可选厂区，请先在厂区字典中添加</span>
         </el-form-item>
         <el-form-item label="状态">
           <el-switch v-model="form.is_active" active-text="启用" inactive-text="禁用" />

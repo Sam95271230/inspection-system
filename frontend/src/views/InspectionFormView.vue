@@ -13,7 +13,7 @@ const stationOptions = ref<any[]>([])
 // Tab 控制
 const activeTab = ref('single')
 
-const form = reactive({
+const getInitialForm = () => ({
   plant_id: '',
   line_id: '',
   station_id: '',
@@ -25,8 +25,16 @@ const form = reactive({
   inspector_name: '',
   remark: '',
   status: 'SUBMITTED',
-  images: [] as any[]
+  images: [] as any[],
 })
+
+const form = reactive(getInitialForm())
+
+const resetForm = () => {
+  Object.assign(form, getInitialForm())
+  lineOptions.value = []
+  stationOptions.value = []
+}
 
 // 批量导入
 const batchFile = ref<File | null>(null)
@@ -96,17 +104,7 @@ const submit = async () => {
       }))
     })
     ElMessage.success('巡检提交成功')
-    // 清空表单
-    form.plant_id = ''
-    form.line_id = ''
-    form.station_id = ''
-    form.ip_address = ''
-    form.antivirus_status = 'NORMAL'
-    form.domain_status = 'JOINED'
-    form.remark = ''
-    form.images = []
-    lineOptions.value = []
-    stationOptions.value = []
+    resetForm()
   } finally {
     loading.value = false
   }
@@ -316,7 +314,7 @@ onMounted(() => {
     ├── 2_1.jpg     (第2行第1张图)
     ├── 2_2.jpg     (第2行第2张图)
     └── 3_1.jpg     (第3行第1张图)</pre>
-                  <p><strong>Excel 表头：</strong>厂区代码 | 线别代码 | 站别代码 | IP地址 | 防毒状态 | 入域状态 | 备注 | 图片数量</p>
+                  <p><strong>Excel 表头：</strong>厂区代码 | 线别代码 | 站别代码 | IP地址 | 机器名 | 防毒状态 | 入域状态 | 巡检时间 | 巡检人 | 备注 | 图片数量</p>
                   <p><strong>图片命名：</strong><code>行号_序号.jpg</code>（例如 <code>2_1.jpg</code> = 第2行第1张图）</p>
                 </div>
               </template>

@@ -3,8 +3,8 @@
 """
 
 
-def success(data=None, message="success"):
-    return {"code": 200, "message": message, "data": data}
+def success(data=None, message="success", code=200):
+    return {"code": code, "message": message, "data": data}
 
 
 def error(message="失败", code=400, data=None):

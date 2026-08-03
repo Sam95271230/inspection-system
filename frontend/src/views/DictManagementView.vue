@@ -1,8 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { getPlantDictTree, importDict } from '@/api/inspection'
-import { ElMessage } from 'element-plus'
-import { Upload, Download } from '@element-plus/icons-vue'
+import { ref, reactive, onMounted } from 'vue'
+import {
+  getPlantDictTree,
+  importDict,
+  createPlant,
+  updatePlant,
+  deletePlant,
+  createLine,
+  updateLine,
+  deleteLine,
+  createStation,
+  updateStation,
+  deleteStation,
+} from '@/api/inspection'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Upload, Download, Edit, Delete, Plus } from '@element-plus/icons-vue'
 import * as XLSX from 'xlsx'
 
 const treeData = ref<any[]>([])
@@ -14,12 +26,149 @@ const pendingFile = ref<File | null>(null)
 
 const columnLabels = ['厂区代码', '厂区名称', '线别代码', '线别名称', '站别代码', '站别名称']
 
+// ─────── 新增 / 编辑弹窗 ───────
+const dialogVisible = ref(false)
+const dialogType = ref<'plant' | 'line' | 'station'>('plant')
+const isCreate = ref(false)
+const dialogId = ref('')
+const dialogParentId = ref('')  // 新增线别/站别时的父级 ID
+const dialogParentLabel = ref('')
+const dialogForm = reactive({ code: '', name: '' })
+const dialogSaving = ref(false)
+
+const dialogTitle = () => {
+  const typeMap: Record<string, string> = { plant: '厂区', line: '线别', station: '站别' }
+  const prefix = isCreate.value ? '新增' : '编辑'
+  return prefix + typeMap[dialogType.value]
+}
+
+// ── 新增 ──
+const openCreatePlant = () => {
+  dialogType.value = 'plant'; isCreate.value = true
+  dialogId.value = ''; dialogParentId.value = ''; dialogParentLabel.value = ''
+  dialogForm.code = ''; dialogForm.name = ''
+  dialogVisible.value = true
+}
+const openCreateLine = (plantId: string, plantLabel: string) => {
+  dialogType.value = 'line'; isCreate.value = true
+  dialogId.value = ''; dialogParentId.value = plantId; dialogParentLabel.value = plantLabel
+  dialogForm.code = ''; dialogForm.name = ''
+  dialogVisible.value = true
+}
+const openCreateStation = (lineId: string, lineLabel: string) => {
+  dialogType.value = 'station'; isCreate.value = true
+  dialogId.value = ''; dialogParentId.value = lineId; dialogParentLabel.value = lineLabel
+  dialogForm.code = ''; dialogForm.name = ''
+  dialogVisible.value = true
+}
+
+// ── 编辑 ──
+const openEditPlant = (plant: any) => {
+  dialogType.value = 'plant'; isCreate.value = false
+  dialogId.value = plant.id; dialogParentId.value = ''; dialogParentLabel.value = ''
+  dialogForm.code = plant.code; dialogForm.name = plant.name
+  dialogVisible.value = true
+}
+const openEditLine = (line: any, plantName: string) => {
+  dialogType.value = 'line'; isCreate.value = false
+  dialogId.value = line.id; dialogParentId.value = ''; dialogParentLabel.value = plantName
+  dialogForm.code = line.code; dialogForm.name = line.name
+  dialogVisible.value = true
+}
+const openEditStation = (station: any, lineName: string) => {
+  dialogType.value = 'station'; isCreate.value = false
+  dialogId.value = station.id; dialogParentId.value = ''; dialogParentLabel.value = lineName
+  dialogForm.code = station.code; dialogForm.name = station.name
+  dialogVisible.value = true
+}
+
+const handleDialogSave = async () => {
+  if (!dialogForm.code || !dialogForm.name) {
+    ElMessage.error('代码和名称不能为空')
+    return
+  }
+  dialogSaving.value = true
+  try {
+    const payload = { code: dialogForm.code, name: dialogForm.name }
+    if (isCreate.value) {
+      if (dialogType.value === 'plant') {
+        await createPlant(payload)
+      } else if (dialogType.value === 'line') {
+        await createLine({ ...payload, plant_id: dialogParentId.value })
+      } else {
+        await createStation({ ...payload, line_id: dialogParentId.value })
+      }
+    } else {
+      if (dialogType.value === 'plant') {
+        await updatePlant(dialogId.value, payload)
+      } else if (dialogType.value === 'line') {
+        await updateLine(dialogId.value, payload)
+      } else {
+        await updateStation(dialogId.value, payload)
+      }
+    }
+    ElMessage.success(isCreate.value ? '新增成功' : '修改成功')
+    dialogVisible.value = false
+    await loadTree()
+  } catch {
+    // error handled by interceptor
+  } finally {
+    dialogSaving.value = false
+  }
+}
+
+// ─────── 删除确认 ───────
+const handleDeletePlant = async (plant: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除厂区 "${plant.code} - ${plant.name}" 吗？其下的线别和站别也将一并删除。`,
+      '删除厂区',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    await deletePlant(plant.id)
+    ElMessage.success('删除成功')
+    await loadTree()
+  } catch (e: any) {
+    if (e !== 'cancel') { /* error handled by interceptor */ }
+  }
+}
+
+const handleDeleteLine = async (line: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除线别 "${line.code} - ${line.name}" 吗？其下的站别也将一并删除。`,
+      '删除线别',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    await deleteLine(line.id)
+    ElMessage.success('删除成功')
+    await loadTree()
+  } catch (e: any) {
+    if (e !== 'cancel') { /* error handled by interceptor */ }
+  }
+}
+
+const handleDeleteStation = async (station: any) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除站别 "${station.code} - ${station.name}" 吗？`,
+      '删除站别',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+    await deleteStation(station.id)
+    ElMessage.success('删除成功')
+    await loadTree()
+  } catch (e: any) {
+    if (e !== 'cancel') { /* error handled by interceptor */ }
+  }
+}
+
+// ─────── 文件导入（原有）───────
 const triggerFileSelect = () => {
   const input = document.querySelector('.hidden-file-input') as HTMLInputElement
   if (input) input.click()
 }
 
-// 加载树形字典
 const loadTree = async () => {
   treeLoading.value = true
   try {
@@ -30,7 +179,6 @@ const loadTree = async () => {
   }
 }
 
-// 解析 Excel 预览（使用 xlsx 库）
 const handleFileChange = (file: File) => {
   pendingFile.value = file
   const reader = new FileReader()
@@ -65,13 +213,11 @@ const handleFileChange = (file: File) => {
   reader.readAsArrayBuffer(file)
 }
 
-// 执行导入
 const handleImport = async () => {
   if (!pendingFile.value) {
     ElMessage.warning('请先选择文件')
     return
   }
-
   uploadLoading.value = true
   try {
     const res: any = await importDict(pendingFile.value)
@@ -85,14 +231,12 @@ const handleImport = async () => {
   }
 }
 
-// 取消预览
 const cancelPreview = () => {
   previewShow.value = false
   previewData.value = []
   pendingFile.value = null
 }
 
-// 下载模板
 const downloadTemplate = () => {
   const headers = columnLabels
   const sampleData = [
@@ -101,7 +245,6 @@ const downloadTemplate = () => {
     ['F1', '一厂', 'A02', '组装线', 'S03', '焊接站'],
     ['F2', '二厂', 'B01', '包装线', 'S04', '检验站'],
   ]
-
   const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleData])
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1')
@@ -121,7 +264,7 @@ onMounted(() => {
         <div class="page-header">厂区字典管理</div>
       </template>
 
-      <!-- 上传区域 -->
+      <!-- 上传区域（原有） -->
       <div class="upload-area">
         <el-button type="primary" :loading="uploadLoading" @click="triggerFileSelect">
           <el-icon><Upload /></el-icon> 选择 Excel 文件
@@ -144,7 +287,7 @@ onMounted(() => {
         <span v-if="pendingFile" class="file-name">已选择：{{ pendingFile.name }}</span>
       </div>
 
-      <!-- 预览表格 -->
+      <!-- 预览表格（原有） -->
       <div v-if="previewShow && previewData.length > 0" class="preview-section">
         <h4>预览数据（共 {{ previewData.length }} 行）</h4>
         <el-table :data="previewData" border stripe max-height="400" size="small">
@@ -161,36 +304,88 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 现有字典树 -->
-      <h4>已有厂区字典</h4>
+      <!-- 已有字典树 -->
+      <div class="tree-header">
+        <h4>已有厂区字典</h4>
+        <el-button type="primary" size="small" :icon="Plus" @click="openCreatePlant">新增厂区</el-button>
+      </div>
       <div v-loading="treeLoading">
-        <el-collapse v-if="treeData.length > 0" accordion>
-          <el-collapse-item
-            v-for="plant in treeData"
-            :key="plant.id"
-            :title="`${plant.code} - ${plant.name}`"
-          >
-            <div class="dict-level">
-              <div v-for="line in plant.children" :key="line.id" class="line-item">
-                <strong>{{ line.code }} - {{ line.name }}</strong>
-                <div v-if="line.children && line.children.length > 0" class="station-list">
-                  <el-tag
-                    v-for="station in line.children"
-                    :key="station.id"
-                    size="small"
-                    class="station-tag"
-                  >
-                    {{ station.code }} - {{ station.name }}
-                  </el-tag>
-                </div>
-                <span v-else class="no-data">无站别</span>
+        <div v-if="treeData.length > 0" class="dict-tree">
+          <div v-for="plant in treeData" :key="plant.id" class="dict-plant">
+            <div class="dict-item plant-item">
+              <div class="item-info">
+                <span class="item-code">{{ plant.code }}</span>
+                <span class="item-sep">-</span>
+                <span class="item-name">{{ plant.name }}</span>
+                <el-tag size="small" type="success" class="item-type">厂区</el-tag>
+              </div>
+              <div class="item-actions">
+                <el-button type="success" link size="small" :icon="Plus" @click="openCreateLine(plant.id, plant.code + ' - ' + plant.name)">新增线别</el-button>
+                <el-button type="primary" link size="small" :icon="Edit" @click="openEditPlant(plant)">编辑</el-button>
+                <el-button type="danger" link size="small" :icon="Delete" @click="handleDeletePlant(plant)">删除</el-button>
               </div>
             </div>
-          </el-collapse-item>
-        </el-collapse>
+
+            <!-- 线别 -->
+            <div v-if="plant.children && plant.children.length" class="dict-lines">
+              <div v-for="line in plant.children" :key="line.id" class="dict-line">
+                <div class="dict-item line-item">
+                  <div class="item-info">
+                    <span class="item-code">{{ line.code }}</span>
+                    <span class="item-sep">-</span>
+                    <span class="item-name">{{ line.name }}</span>
+                    <el-tag size="small" type="warning" class="item-type">线别</el-tag>
+                  </div>
+                  <div class="item-actions">
+                    <el-button type="success" link size="small" :icon="Plus" @click="openCreateStation(line.id, line.code + ' - ' + line.name)">新增站别</el-button>
+                    <el-button type="primary" link size="small" :icon="Edit" @click="openEditLine(line, plant.code + ' - ' + plant.name)">编辑</el-button>
+                    <el-button type="danger" link size="small" :icon="Delete" @click="handleDeleteLine(line)">删除</el-button>
+                  </div>
+                </div>
+
+                <!-- 站别 -->
+                <div v-if="line.children && line.children.length" class="dict-stations">
+                  <div v-for="station in line.children" :key="station.id" class="dict-item station-item">
+                    <div class="item-info">
+                      <span class="item-code">{{ station.code }}</span>
+                      <span class="item-sep">-</span>
+                      <span class="item-name">{{ station.name }}</span>
+                      <el-tag size="small" type="info" class="item-type">站别</el-tag>
+                    </div>
+                    <div class="item-actions">
+                      <el-button type="primary" link size="small" :icon="Edit" @click="openEditStation(station, line.code + ' - ' + line.name)">编辑</el-button>
+                      <el-button type="danger" link size="small" :icon="Delete" @click="handleDeleteStation(station)">删除</el-button>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="no-children">暂无站别</div>
+              </div>
+            </div>
+            <div v-else class="no-children">暂无下属线别</div>
+          </div>
+        </div>
         <el-empty v-else description="暂无数据，请导入" />
       </div>
     </el-card>
+
+    <!-- 新增 / 编辑弹窗 -->
+    <el-dialog v-model="dialogVisible" :title="dialogTitle()" width="480px">
+      <el-form :model="dialogForm" label-width="80px">
+        <el-form-item v-if="dialogParentLabel" label="所属">
+          <span class="parent-label">{{ dialogParentLabel }}</span>
+        </el-form-item>
+        <el-form-item label="代码">
+          <el-input v-model="dialogForm.code" placeholder="请输入代码" />
+        </el-form-item>
+        <el-form-item label="名称">
+          <el-input v-model="dialogForm.name" placeholder="请输入名称" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="dialogSaving" @click="handleDialogSave">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -228,28 +423,91 @@ onMounted(() => {
   display: flex;
   gap: 12px;
 }
-.dict-level {
-  padding: 8px 16px;
+
+/* 树形字典 */
+.tree-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 16px 0 12px;
+}
+.tree-header h4 {
+  margin: 0;
+}
+.dict-tree {
+  margin-top: 12px;
+}
+.dict-plant {
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.dict-lines {
+  border-top: 1px solid #ebeef5;
+  background: #fafafa;
+}
+.dict-line {
+  border-bottom: 1px solid #ebeef5;
+}
+.dict-line:last-child {
+  border-bottom: none;
+}
+.dict-stations {
+  margin-left: 32px;
+  border-top: 1px dashed #e4e7ed;
+}
+.dict-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  transition: background 0.15s;
+}
+.dict-item:hover {
+  background: #f5f7fa;
+}
+.plant-item {
+  background: #ecf5ff;
 }
 .line-item {
-  margin-bottom: 12px;
+  background: #fdf6ec;
 }
-.line-item strong {
-  display: block;
-  margin-bottom: 4px;
+.station-item {
+  padding-left: 32px;
 }
-.station-list {
+.item-info {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  margin-left: 16px;
 }
-.station-tag {
-  margin-bottom: 0;
+.item-code {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-weight: 600;
+  color: #303133;
 }
-.no-data {
-  color: #ccc;
+.item-sep {
+  color: #c0c4cc;
+}
+.item-name {
+  color: #606266;
+}
+.item-type {
+  margin-left: 6px;
+  font-size: 11px;
+}
+.item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.no-children {
+  padding: 8px 16px 8px 48px;
+  color: #c0c4cc;
   font-size: 13px;
-  margin-left: 16px;
+}
+.parent-label {
+  color: #409eff;
+  font-weight: 500;
 }
 </style>

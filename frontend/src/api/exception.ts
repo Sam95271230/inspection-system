@@ -13,3 +13,9 @@ export const approveException = (ticketId: string, data: any) => request.post(`/
 export const rejectException = (ticketId: string, data: any) => request.post(`/exceptions/${ticketId}/reject`, data)
 
 export const reprocessException = (ticketId: string, data: any) => request.post(`/exceptions/${ticketId}/reprocess`, data)
+
+export const uploadExceptionImage = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post('/exceptions/upload-image', formData)
+}

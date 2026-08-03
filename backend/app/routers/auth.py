@@ -6,13 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
+import os
 
 from app.database import get_db
 from app.models.user import SysUser
 from app.security.password import verify_password, get_password_hash
-from app.utils.jwt_util import create_access_token, decode_token
+from app.utils.jwt_util import create_access_token
 from app.utils.response import success
 from app.schemas.user import UserInfo, UserCreate
+from app.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
@@ -56,28 +58,31 @@ async def login(
 
 
 @router.get("/me", response_model=UserInfo)
-async def get_me(token: str, db: AsyncSession = Depends(get_db)):
+async def get_me(
+    current_user: SysUser = Depends(get_current_user),
+):
     """
     获取当前登录用户信息
     """
-    payload = decode_token(token)
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Token 无效")
-
-    result = await db.execute(select(SysUser).where(SysUser.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
-
-    return user
+    return current_user
 
 
 @router.post("/init-admin")
 async def init_admin(data: UserCreate, db: AsyncSession = Depends(get_db)):
     """
-    初始化管理员账号，仅用于首次部署
+    初始化管理员账号，仅用于首次部署。
+    通过环境变量 ALLOW_INIT_ADMIN=true 启用，初始化后应关闭。
     """
+    if os.getenv("ALLOW_INIT_ADMIN", "false").lower() != "true":
+        raise HTTPException(status_code=403, detail="初始化管理员功能未启用，请设置 ALLOW_INIT_ADMIN=true")
+
+    # 如果已存在任何管理员，则拒绝再次初始化
+    existing_admin = await db.execute(
+        select(SysUser).where(SysUser.is_superadmin.is_(True)).limit(1)
+    )
+    if existing_admin.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="已存在管理员账号，请通过用户管理页面创建新用户")
+
     result = await db.execute(select(SysUser).where(SysUser.username == data.username))
     if result.scalar_one_or_none():
         return {"code": 400, "message": "用户已存在", "data": None}

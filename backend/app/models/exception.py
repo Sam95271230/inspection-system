@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey, ARRAY
 from sqlalchemy.dialects.postgresql import UUID
 from app.database import Base
@@ -14,8 +14,8 @@ class ExceptionTicket(Base):
     title = Column(String(255), nullable=False)
     status = Column(String(32), default="PENDING")
     current_assignee_id = Column(UUID(as_uuid=True), ForeignKey("sys_user.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class ExceptionHistory(Base):
@@ -29,4 +29,4 @@ class ExceptionHistory(Base):
     action = Column(String(64), nullable=False)
     remark = Column(Text)
     attachment_urls = Column(ARRAY(String))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

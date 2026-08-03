@@ -31,15 +31,17 @@ async def _get_user_roles(db, user_id: str) -> list:
 
 
 async def _get_user_plants(db, user_id: str) -> list:
+    """获取用户的厂区-角色映射 [{plant_id, role}]"""
     result = await db.execute(
-        select(user_plant.c.plant_id).where(user_plant.c.user_id == user_id)
+        select(user_plant.c.plant_id, user_plant.c.role).where(user_plant.c.user_id == user_id)
     )
-    return [str(p[0]) for p in result.all()]
+    return [{"plant_id": str(p[0]), "role": p[1] or "MEMBER"} for p in result.all()]
 
 
 async def _build_user_response(db, user: SysUser) -> dict:
     role_ids, role_names = await _get_user_roles(db, user.id)
-    plant_ids = await _get_user_plants(db, user.id)
+    plant_roles = await _get_user_plants(db, user.id)
+    plant_ids = [p["plant_id"] for p in plant_roles]
     return {
         "id": str(user.id),
         "username": user.username,
@@ -52,6 +54,7 @@ async def _build_user_response(db, user: SysUser) -> dict:
         "role_ids": role_ids,
         "role_names": role_names,
         "plant_ids": plant_ids,
+        "plant_roles": plant_roles,
     }
 
 
@@ -85,10 +88,19 @@ async def create_user(
                 user_role.insert().values(user_id=user.id, role_id=role_id)
             )
 
-    if data.plant_ids and not data.is_superadmin:
-        for plant_id in data.plant_ids:
+    plant_roles = data.plant_roles or []
+    # 向后兼容 plant_ids
+    if not plant_roles and data.plant_ids:
+        plant_roles = [{"plant_id": pid, "role": "MEMBER"} for pid in data.plant_ids]
+
+    if plant_roles and not data.is_superadmin:
+        for pr in plant_roles:
             await db.execute(
-                user_plant.insert().values(user_id=user.id, plant_id=plant_id)
+                user_plant.insert().values(
+                    user_id=user.id,
+                    plant_id=pr.plant_id if hasattr(pr, 'plant_id') else pr["plant_id"],
+                    role=pr.role if hasattr(pr, 'role') else pr.get("role", "MEMBER")
+                )
             )
 
     await db.commit()
@@ -101,7 +113,17 @@ async def list_users(
     page_size: int = 10,
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(SysUser).order_by(SysUser.created_at.desc()))
+    from sqlalchemy import func as sql_func
+
+    # 查询总数
+    count_result = await db.execute(select(sql_func.count()).select_from(SysUser))
+    total = count_result.scalar() or 0
+
+    # 分页查询
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        select(SysUser).order_by(SysUser.created_at.desc()).offset(offset).limit(page_size)
+    )
     users = result.scalars().all()
 
     user_list = []
@@ -111,7 +133,7 @@ async def list_users(
 
     return success({
         "list": user_list,
-        "total": len(user_list)
+        "total": total
     })
 
 
@@ -159,12 +181,19 @@ async def update_user(
                 user_role.insert().values(user_id=user.id, role_id=role_id)
             )
 
-    if data.plant_ids is not None:
+    if data.plant_ids is not None or data.plant_roles is not None:
         await db.execute(delete(user_plant).where(user_plant.c.user_id == user_id))
-        if not user.is_superadmin:
-            for plant_id in data.plant_ids:
+        plant_roles = data.plant_roles or []
+        if not plant_roles and data.plant_ids:
+            plant_roles = [{"plant_id": pid, "role": "MEMBER"} for pid in data.plant_ids]
+        if plant_roles and not user.is_superadmin:
+            for pr in plant_roles:
                 await db.execute(
-                    user_plant.insert().values(user_id=user.id, plant_id=plant_id)
+                    user_plant.insert().values(
+                        user_id=user.id,
+                        plant_id=pr.plant_id if hasattr(pr, 'plant_id') else pr["plant_id"],
+                        role=pr.role if hasattr(pr, 'role') else pr.get("role", "MEMBER")
+                    )
                 )
 
     await db.commit()

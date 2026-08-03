@@ -11,6 +11,7 @@ venv/
 # Node.js / Frontend
 node_modules/
 dist/
+*.tsbuildinfo
 
 # IDE
 .vscode/

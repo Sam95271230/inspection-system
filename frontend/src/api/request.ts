@@ -24,7 +24,16 @@ request.interceptors.response.use(
     return Promise.reject(new Error(message))
   },
   (error) => {
-    const msg = error.response?.data?.message || '网络异常'
+    // 401 未认证，跳转登录页
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token')
+      localStorage.removeItem('user')
+      window.location.href = '/login'
+      return Promise.reject(error)
+    }
+    // FastAPI HTTPException 返回 {"detail": "..."}，业务错误返回 {"message": "..."}
+    const data = error.response?.data
+    const msg = data?.message || data?.detail || '网络异常'
     ElMessage.error(msg)
     return Promise.reject(error)
   }

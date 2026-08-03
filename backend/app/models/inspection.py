@@ -3,7 +3,7 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -26,9 +26,9 @@ class Inspection(Base):
     status = Column(String(32), default="SUBMITTED")
     inspector_id = Column(UUID(as_uuid=True), ForeignKey("sys_user.id"), nullable=False)
     inspector_name = Column(String(64))
-    inspect_time = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    inspect_time = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     images = relationship("InspectionImage", back_populates="inspection", cascade="all, delete-orphan")
 

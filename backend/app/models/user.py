@@ -3,7 +3,7 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Boolean, DateTime, Table, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from app.database import Base
@@ -18,12 +18,13 @@ user_role = Table(
 )
 
 
-# 用户-厂区 数据权限关联表
+# 用户-厂区 数据权限关联表（含角色：MEMBER/LEADER）
 user_plant = Table(
     "user_plant",
     Base.metadata,
     Column("user_id", UUID(as_uuid=True), ForeignKey("sys_user.id"), primary_key=True),
     Column("plant_id", UUID(as_uuid=True), ForeignKey("plant.id"), primary_key=True),
+    Column("role", String(16), default="MEMBER"),
 )
 
 
@@ -47,5 +48,5 @@ class SysUser(Base):
     mobile = Column(String(20))
     is_active = Column(Boolean, default=True)
     is_superadmin = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

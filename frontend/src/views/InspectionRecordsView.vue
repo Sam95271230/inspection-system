@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { getInspectionList, getPlantDictTree, exportInspections } from '@/api/inspection'
 import { ElMessage } from 'element-plus'
+import { STATUS_LABEL_MAP } from '@/constants'
 
 // 字典
 const plantOptions = ref<any[]>([])
@@ -32,15 +33,8 @@ const pagination = reactive({
 const detailVisible = ref(false)
 const currentRecord = ref<any>(null)
 
-// 状态映射
-const statusMap: Record<string, string> = {
-  NORMAL: '正常',
-  ABNORMAL: '异常',
-  NOT_INSTALLED: '未安装',
-  JOINED: '已入域',
-  NOT_JOINED: '未入域',
-  NOT_APPLICABLE: '不适用'
-}
+// 状态映射（从常量导入）
+const statusMap = STATUS_LABEL_MAP
 
 // 加载厂区字典
 const loadDict = async () => {
@@ -234,7 +228,11 @@ onMounted(() => {
       <!-- 数据表格 -->
       <el-table :data="tableData" v-loading="loading" border stripe>
         <el-table-column prop="serial_no" label="巡检单号" width="160" />
+        <el-table-column prop="plant_name" label="厂区" width="110" />
+        <el-table-column prop="line_name" label="线别" width="110" />
+        <el-table-column prop="station_name" label="站别" width="110" />
         <el-table-column prop="ip_address" label="IP 地址" width="140" />
+        <el-table-column prop="machine_name" label="机器名" width="130" />
         <el-table-column label="防毒软件" width="120">
           <template #default="{ row }">
             <el-tag :type="row.antivirus_status === 'NORMAL' ? 'success' : 'danger'">
@@ -250,6 +248,7 @@ onMounted(() => {
           </template>
         </el-table-column>
         <el-table-column prop="inspect_time" label="巡检时间" width="180" />
+        <el-table-column prop="inspector_name" label="巡检人" width="100" />
         <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="showDetail(row)">查看详情</el-button>
@@ -277,8 +276,11 @@ onMounted(() => {
         <el-descriptions :column="2" border>
           <el-descriptions-item label="巡检单号">{{ currentRecord.serial_no }}</el-descriptions-item>
           <el-descriptions-item label="IP 地址">{{ currentRecord.ip_address }}</el-descriptions-item>
+          <el-descriptions-item label="机器名">{{ currentRecord.machine_name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="防毒软件">{{ statusMap[currentRecord.antivirus_status] }}</el-descriptions-item>
           <el-descriptions-item label="入域情况">{{ statusMap[currentRecord.domain_status] }}</el-descriptions-item>
+          <el-descriptions-item label="巡检时间">{{ currentRecord.inspect_time || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="巡检人">{{ currentRecord.inspector_name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="备注" :span="2">{{ currentRecord.remark || '-' }}</el-descriptions-item>
         </el-descriptions>
 

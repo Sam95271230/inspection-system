@@ -1,5 +1,11 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from uuid import UUID
 from typing import Optional, List
+
+
+class PlantRole(BaseModel):
+    plant_id: str
+    role: str  # MEMBER / LEADER
 
 
 class UserLogin(BaseModel):
@@ -16,7 +22,8 @@ class UserCreate(BaseModel):
     is_active: bool = True
     is_superadmin: bool = False
     role_ids: List[str] = []
-    plant_ids: List[str] = []
+    plant_ids: List[str] = []  # 向后兼容
+    plant_roles: List[PlantRole] = []
 
 
 class UserUpdate(BaseModel):
@@ -26,10 +33,13 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     is_superadmin: Optional[bool] = None
     role_ids: Optional[List[str]] = None
-    plant_ids: Optional[List[str]] = None
+    plant_ids: Optional[List[str]] = None  # 向后兼容
+    plant_roles: Optional[List[PlantRole]] = None
 
 
 class UserInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     username: str
     real_name: Optional[str] = None
@@ -37,10 +47,15 @@ class UserInfo(BaseModel):
     is_active: bool
     is_superadmin: bool
 
-    class Config:
-        from_attributes = True
+    @field_validator('id', mode='before')
+    @classmethod
+    def coerce_id(cls, v):
+        if isinstance(v, UUID):
+            return str(v)
+        return str(v)
 
 
 class UserOut(UserInfo):
     role_ids: List[str] = []
     plant_ids: List[str] = []
+    plant_roles: List[PlantRole] = []
